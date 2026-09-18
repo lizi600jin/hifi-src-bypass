@@ -1,0 +1,7 @@
+# This repo ships shell scripts and awk programs that MUST stay LF-only:
+# a CRLF shell script dies on Android with the classic "\r: not found".
+# Normalise text to LF in the repo AND on checkout; never touch binaries.
+* text=auto eol=lf
+*.zip binary
+*.png binary
+*.jpg binary
