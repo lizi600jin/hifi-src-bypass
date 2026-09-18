@@ -104,7 +104,7 @@ DAC 那一侧仍然卡在 96k —— 这就是「改了没用」的根因。
 
 ## 4. 安装
 
-1. 下载本仓库 `dist/hifi-src-bypass-v1.5.zip`
+1. 下载本仓库 `dist/hifi-src-bypass-v1.6.zip`
 2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
 3. 重启
 4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
@@ -201,6 +201,31 @@ dist/                       打好的可刷入 zip
 - **改不了的情况**：ROM 用的是厂商自写 USB HAL（表不存在）且策略 XML 又是无 profile 的空壳 ——
   此时两层都无从下手，模块会明确报告「本机没有可补丁的目标」而不是假装成功
 - **上限高于 DAC 真实能力会导致无声**：请用 `hifi preset auto` 或 WebUI 的小尾巴卡片对齐档位
+
+### 遇到不支持的机型怎么办
+
+在管理器终端（或 adb）跑一次深度校验：
+
+```sh
+sh /data/adb/modules/hifi_src_bypass/bin/hifi doctor
+```
+
+它的第 **[8] 段「机型适配信息」**就是为这件事准备的，会把三样东西一次列清：
+
+- **策略文件** —— 本机有哪些、模块补了哪一个 / 跳过了哪一个以及原因、每个文件用的是哪种方言
+- **策略基线** —— 模块挂载的内容是由哪些原厂件生成的（归档清单与大小）
+- **音频输出文件的真实路径** —— 逻辑层（策略里 USB / WIRED / DIRECT 端口分别属于哪个文件）
+  + 物理层（内核导出的 `/proc/asound` 声卡与 PCM 节点）+ 框架里绑定的 `card=` 号
+
+把 **[8] 段**和 **[7] 段「排查明细」**一起贴到 issue，再附一句「机型 / 系统版本 / 小尾巴型号 / 现象」，
+就能直接定位是**策略路径不认识**、**方言不认识**，还是 **HAL 表对不上**。
+
+想一次性导出成文件的话：
+
+```sh
+sh /data/adb/modules/hifi_src_bypass/bin/hifi report
+# 写到 /data/local/tmp/hifi_src_bypass_report.txt —— 无需 root 即可 adb pull 取回
+```
 
 ---
 

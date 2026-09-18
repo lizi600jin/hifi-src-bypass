@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - deep verification (sampling rate + bit depth)
-#                                        probe192.sh           v1.5
+#                                        probe192.sh           v1.6
 #
 #   usage A (module installed):
 #     su -c "sh /data/adb/modules/hifi_src_bypass/bin/probe192.sh"
@@ -839,5 +839,120 @@ printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
 printf '         不开独占时出现 ✅ 模块生效 / ✓ 直通 / ✓ HiFi 通道 = 模块在链路上正常干预；\n'
 printf '         出现 ℹ️ usbfs 接管 = 独占已开（App 直连 DAC，模块在链路外，属正常形态）；\n'
 printf '         异常时把「排查明细」整段发回来可继续定位。\n'
+hr
+
+# ==============================================================================
+# 8. 机型适配信息
+#
+# 换机型 / 刷入无效时，这一段就是"病历"。它只做检测、不改任何东西，
+# 目的是回答三个问题：
+#   ① 这台机器到底有哪些策略文件，模块为什么补了它 / 跳过了它
+#   ② 策略基线是什么（模块挂载的东西是从哪份原厂件生成的）
+#   ③ 音频输出在系统里的真实路径（逻辑端口所属文件 + 内核设备节点 + 声卡号）
+# ==============================================================================
+sec 8 "机型适配信息（换机型 / 无效时请把本段整段贴给维护者）"
+
+printf '设备       : %s (%s)\n' "$(getprop ro.product.device 2>/dev/null)" "$(getprop ro.product.model 2>/dev/null)"
+printf '平台       : %s %s\n' "$(getprop ro.soc.model 2>/dev/null)" "$(getprop ro.board.platform 2>/dev/null)"
+printf '系统       : SDK %s  %s\n' "$(getprop ro.build.version.sdk 2>/dev/null)" "$(getprop ro.build.display.id 2>/dev/null)"
+printf 'SELinux    : %s\n' "$(getenforce 2>/dev/null || echo unknown)"
+printf 'audioserver: %s\n' "$(getprop init.svc.audioserver 2>/dev/null)"
+printf '模块       : %s v%s\n' "$MOD_ID" "$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
+
+printf '\n--- ① 框架自己说它在读哪个配置 ---\n'
+cs="$(dumpsys media.audio_policy 2>/dev/null | sed -n 's/.*Config source: *//p' | head -n1 | tr -d '\r')"
+if [ -n "$cs" ]; then
+  printf '  Config source : %s\n' "$cs"
+  case "$cs" in
+    /*) printf '  → 是一个文件路径，模块会优先补它\n' ;;
+    *)  printf '  → 不是文件路径（例如 AIDL HAL = 策略由 HAL 自带），此时只能靠 HAL 库那一层\n' ;;
+  esac
+else
+  printf '  (读不到：audioserver 未运行或 dumpsys 被拒)\n'
+fi
+
+printf '\n--- ② 模块上次扫描的结论（策略文件 + 每个为什么补 / 为什么跳过）---\n'
+if [ -r "$STATE/report.txt" ]; then
+  sed 's/^/  /' "$STATE/report.txt"
+else
+  printf '  (没有扫描报告：模块可能从未成功扫描，或 state 目录被清)\n'
+fi
+
+printf '\n--- ③ 本机实时存在的策略/配置文件（不依赖模块的判断）---\n'
+_found=0
+for r in /odm /vendor /system/vendor /product /system/etc /system/product/etc; do
+  [ -d "$PROOT$r" ] || continue
+  find "$PROOT$r" -maxdepth 6 -type f \( -name '*audio_policy_configuration*.xml' -o -name 'audio_module_config_*.xml' \) 2>/dev/null \
+    | while IFS= read -r f; do
+        printf '  %-64s %s bytes\n' "$f" "$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+      done
+done
+printf '  --- 各文件用的方言（决定改写规则）---\n'
+for r in /odm /vendor /system/vendor /system/etc; do
+  [ -d "$PROOT$r" ] || continue
+  find "$PROOT$r" -maxdepth 6 -type f -name '*audio_policy_configuration*.xml' 2>/dev/null \
+    | while IFS= read -r f; do
+        q="$(grep -c 'pcmType="' "$f" 2>/dev/null)"; a="$(grep -c 'format="AUDIO_FORMAT_' "$f" 2>/dev/null)"
+        case "$q:$a" in
+          0:0) d="?" ;;
+          *)   if [ "${q:-0}" -gt "${a:-0}" ] 2>/dev/null; then d=qti; else d=aosp; fi ;;
+        esac
+        printf '  %-6s %s\n' "$d" "$f"
+      done
+done
+
+printf '\n--- ④ 音频输出在系统里的真实路径 ---\n'
+printf '  逻辑层（策略里 USB / WIRED / DIRECT 输出口，以及它们所属的文件）:\n'
+for f in $POLICY_FILES; do
+  real="${POLICY_ROOT:-}${f}"
+  [ -r "$real" ] || continue
+  hits="$(port_scan "$real" | grep -E '^(USB|WIRED|DIR)\|' | sed 's/|/ /' | tr '\n' ';')"
+  [ -n "$hits" ] && printf '    %s\n        %s\n' "$f" "$hits"
+done
+[ -n "$POLICY_FILES" ] || printf '    (没有生效中的策略文件)\n'
+printf '  物理层（内核导出给 Android 的声卡与 PCM 节点）:\n'
+if [ -d "$CARD_ROOT" ]; then
+  [ -r "$CARD_ROOT/cards" ] && sed 's/^/    /' "$CARD_ROOT/cards"
+  for pcm in "$CARD_ROOT"/card[0-9]*/pcm*c "$CARD_ROOT"/card[0-9]*/pcm*p; do
+    [ -e "$pcm" ] && printf '    %s\n' "${pcm#$CARD_ROOT/}"
+  done
+  for st in "$CARD_ROOT"/card[0-9]*/stream0; do
+    [ -e "$st" ] && printf '    %s\n' "${st#$CARD_ROOT/}"
+  done
+else
+  printf '    %s 不存在（内核未导出，无法读取）\n' "$CARD_ROOT"
+fi
+printf '  框架侧（dumpsys 里 USB 设备绑定的声卡号）:\n'
+dumpsys media.audio_policy 2>/dev/null | grep -o 'card=[0-9]*;device=[0-9]*' | sort -u | sed 's/^/    @:/' | head -8
+dumpsys media.audio_policy 2>/dev/null | grep -o '"USB Device Out"\|"USB Headset Out"\|"Wired Headset Out"\|"Wired Headphones Out"' | sort -u | sed 's/^/    端口: /'
+
+printf '\n--- ⑤ USB HAL 库（第二层的目标）---\n'
+_n=0
+for d in /odm/lib64 /odm/lib /vendor/lib64 /vendor/lib /system/vendor/lib64 /system/vendor/lib /system/lib64 /system/lib; do
+  for l in libalsautils.so libalsautilsv2.so; do
+    [ -e "$PROOT$d/$l" ] || continue
+    _n=$((_n + 1))
+    ls -l "$PROOT$d/$l" 2>/dev/null | sed 's/^/  /'
+  done
+done
+[ "$_n" = 0 ] && printf '  （本机没有 libalsautils{,v2}.so —— 第二层无目标，模块会跳过，属正常结果）\n'
+
+printf '\n--- ⑥ 策略基线（模块挂载的内容就是由这些原厂件生成的）---\n'
+if [ -d "$STATE/stock" ] && [ -n "$(ls -A "$STATE/stock" 2>/dev/null)" ]; then
+  for a in "$STATE"/stock/*; do
+    [ -f "$a" ] || continue
+    printf '  %-52s %8s bytes\n' "$(basename "$a")" "$(wc -c <"$a" 2>/dev/null | tr -d ' ')"
+  done
+else
+  printf '  (没有归档：模块尚未成功补丁过任何文件)\n'
+fi
+
+printf '\n--- 反馈时请附上 ---\n'
+printf '  1) 本段 [8] 整段（含 ①②③④⑤⑥）\n'
+printf '  2) 本段 [7] 的"排查明细"整段\n'
+printf '  3) 一句话：型号 / 系统版本 / 小尾巴型号 / 现象（无声、卡在 96k、还是完全没反应）\n'
+printf '  想一次性导出成文件的话：在管理器终端执行\n'
+printf '     sh /data/adb/modules/%s/bin/hifi report\n' "$MOD_ID"
+printf '  它会写到 /data/local/tmp/hifi_src_bypass_report.txt，无需 root 即可 adb pull 取回。\n'
 hr
 exit 0
