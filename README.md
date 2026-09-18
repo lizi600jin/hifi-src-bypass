@@ -6,7 +6,7 @@
 > 原厂文件零改写（systemless 绑定挂载），一键还原、卸载自动清理。
 
 本项目是本人 [op13-hifi-src-bypass](https://github.com/lizi600jin/op13-hifi-src-bypass) 的**二改**：
-把「一加 13 专用」重做成**不需要任何机型模板**的全机型通用模块 —— 文件在设备上按规则就地改写，
+目的是把「一加 13 专用」重做成**不需要任何机型模板**的全机型通用模块 —— 文件在设备上按规则就地改写，
 方言自动识别，机型差异交给规则而不是硬编码路径。
 
 ---
@@ -71,7 +71,7 @@ DAC 那一侧仍然卡在 96k —— 这就是「改了没用」的根因。
 
 ## 2. 实测结果
 
-本模块在两台差异很大的真机上完成端到端验证（不是「装上没报错」，而是「实时输出速率确实到了」）：
+本模块在两台差异很大的真机上完成端到端验证（并非仅仅是「模块挂载」，而是真机检验过「实时输出速率」）：
 
 | | 米系（QTI，HIDL 风格策略） | O 系（QTI，AIDL） |
 |---|---|---|
@@ -86,7 +86,7 @@ DAC 那一侧仍然卡在 96k —— 这就是「改了没用」的根因。
 
 两台机器的共同点是「**上限都由第二层决定**」，而路径、方言、库数量全不相同，却**没有一行机型专属代码** —— 这是本项目敢说「通用」的依据。
 
-**未验证、不敢承诺的**：MTK 与谷歌 Tensor（USB 硬件 offload 通常只到 96k，且多半没有 `libalsautils*so`，本模块会安全跳过）、三星 One UI、Android 12 及更早的老 ROM。这些都有夹具测试覆盖，但没有真机数据。
+**未验证**：MTK 与谷歌 Tensor（USB 硬件 offload 通常只到 96k，且多半没有 `libalsautils*so`，本模块会安全跳过）、三星 One UI、Android 12 及更早的老 ROM。这些都有夹具测试覆盖，但没有真机数据。
 
 ---
 
@@ -231,10 +231,9 @@ sh /data/adb/modules/hifi_src_bypass/bin/hifi report
 
 ## 9. 致谢与参考
 
-> **说明**：以下只列**真正被采纳**的东西。本项目由本人
-> [op13-hifi-src-bypass](https://github.com/lizi600jin/op13-hifi-src-bypass) 二改而来 ——
-> 那是本人自己的项目，不再单独致谢；op13 里继承来的第三方署名（Hydro-Br-leur、
-> USB_SampleRate_Changer_WebUI）在此保留，属于我应当继承的署名。
+> **说明**：本项目由本人
+> [op13-hifi-src-bypass](https://github.com/lizi600jin/op13-hifi-src-bypass) 二改而来
+
 
 ### USB Samplerate Unlocker ★ 第二层的来源
 
@@ -281,9 +280,4 @@ sh /data/adb/modules/hifi_src_bypass/bin/hifi report
 模块框架与生命周期约定（`module.prop`、`post-fs-data.sh` / `service.sh` / `action.sh`、
 WebUI 桥接、以及用 `nsenter -t 1 -m` 进入全局挂载命名空间）。
 
-### 明确没有采纳的
 
-除上述以外，没有采纳任何第三方模块的代码、常量或结构。
-本项目的**扫描器**（多路径 + `xi:include` 跟随 + 去重）、**方言自动识别**、
-两套**规则化 awk 改写 / 校验器**、`patch_hal.sh`、以及全部离线测试与夹具，
-都是在本项目里新写的；op13 原先的「模板 + `@TOKEN@` 占位符」方案已被规则化改写取代。
