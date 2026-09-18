@@ -1,0 +1,1551 @@
+#!/system/bin/sh
+# ==============================================================================
+# HiFi SRC Bypass - universal USB / wired SRC bypass
+#                                on-device controller            v1.5
+#
+#   what it does
+#     The factory audio policy of THIS phone is located automatically -- no
+#     device template, no hard-coded OnePlus paths.  Every file that really
+#     contains a USB / wired / DIRECT output port is patched in memory:
+#
+#       * samplingRates of those ports re-capped to the chosen ceiling
+#       * 24 / 32-bit profiles appended when the factory only declared 16-bit
+#       * the primary mixer rate aligned to the chosen mixer value
+#
+#     The factory file is NEVER modified.  A patched copy is bind-mounted over
+#     the real path inside the global (init) mount namespace so audioserver
+#     sees it -> unmounting the bind is a 100 % lossless restore.
+#
+#   what it deliberately does not do
+#     add / remove / rename any mixPort, devicePort or route.  This is not a
+#     promise, it is checked on the device by payload/check_policy.awk before
+#     anything gets mounted; if the check fails the module stays inert and the
+#     factory policy keeps running.
+#
+#   usage
+#     hifi status | dac | json | rates | ports | files | scan
+#     hifi set <key> <val>          apply | restore | reset
+#     hifi preset auto|384k|192k|96k|44k
+#     hifi verify | doctor | log | boot | uninstall
+#
+#   runs under Magisk / KernelSU / APatch
+# ==============================================================================
+
+set -u
+
+# ------------------------------------------------------------------ self path
+SELF="$0"
+case "$SELF" in
+  /*) ;;
+  *)  SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")" ;;
+esac
+MODDIR="${MODDIR:-$(cd "$(dirname "$SELF")/.." 2>/dev/null && pwd)}"
+
+MOD_ID=hifi_src_bypass
+MARKER=HIFI_SRC_BYPASS_UNIV
+
+# ------------------------------------------------------- offline test hooks
+# Empty in production; only used by the desktop regression harness so the
+# controller can run against a fixture tree without root or a real device.
+#   HIFI_FAKE_ROOT   prefix prepended to every absolute policy path
+#   HIFI_FAKE_MOUNTS alternative mounts file (default /proc/mounts)
+#   HIFI_FAKE_ASOUND alternative /proc/asound tree
+#   HIFI_STATE_DIR   alternative state dir (default /data/adb/$MOD_ID)
+PROOT="${HIFI_FAKE_ROOT:-}"
+MOUNTS="${HIFI_FAKE_MOUNTS:-/proc/mounts}"
+ASOUND="${HIFI_FAKE_ASOUND:-/proc/asound}"
+
+STATE="${HIFI_STATE_DIR:-/data/adb/$MOD_ID}"
+CONF="$STATE/config.conf"
+TGT="$STATE/targets.lst"
+LOG="$STATE/last.log"
+REPORT="$STATE/report.txt"
+CACHE="$STATE/targets.cache"
+PATCHER="$MODDIR/payload/patch_policy.awk"
+CHECKER="$MODDIR/payload/check_policy.awk"
+HALPATCH="$MODDIR/payload/patch_hal.sh"
+
+# The old OnePlus-13-only module.  If it is still installed, its bind mount
+# would fight ours, so we notice it and say so instead of failing cryptically.
+OLD_ID=op13_hifi_src_bypass
+OLD_STATE=/data/adb/op13_hifi
+
+# ------------------------------------------------------------------- defaults
+# Every key MUST be initialised here: the script runs under `set -u` and
+# load_conf() re-reads them afterwards, so a truncated config file would
+# otherwise abort on the first reference.
+MIXER_RATE=48000
+MAX_RATE=384000
+BIT_DEPTH=32
+ENABLED=1
+RESTART=1
+# Second layer: reorder the sample-rate table inside the AOSP USB HAL library.
+# The policy XML tells the *framework* what it may request; the HAL keeps its
+# own hard ceiling (usually 96000) and that is what actually reaches the DAC.
+# 1 = unlock it (only ever acts when the known table is found exactly once).
+HAL_PATCH=1
+
+DIRECT_POOL="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
+USB_POOL="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
+ALL_RATES="48000 96000 176400 192000 352800 384000"
+ALL_BITS="16 24 32"
+
+# ------------------------------------------------------------------ candidates
+# Canonical locations, in the order the vendors actually use them.  Every one
+# of these is a real path (the /system/vendor duplicates are included because
+# on some ROMs /vendor is a symlink and `find` does not follow it).
+FIXED_CANDIDATES="
+/odm/etc/audio/audio_module_config_primary.xml
+/odm/etc/audio/audio_module_config_secondary.xml
+/odm/etc/audio/audio_policy_configuration.xml
+/odm/etc/audio_policy_configuration.xml
+/vendor/etc/audio/audio_module_config_primary.xml
+/vendor/etc/audio/audio_policy_configuration.xml
+/vendor/etc/audio_policy_configuration.xml
+/system/vendor/etc/audio/audio_policy_configuration.xml
+/system/vendor/etc/audio_policy_configuration.xml
+/system/vendor/etc/audio/audio_module_config_primary.xml
+/product/etc/audio_policy_configuration.xml
+/system/etc/audio_policy_configuration.xml
+"
+
+# ------------------------------------------------- second layer: the USB HAL
+# libalsautils{,v2}.so carry the compile-time table of sample rates the USB HAL
+# will actually open; its first entry is the advertised maximum and is 96000 on
+# most builds.  Reordering those 13 uint32s is what lifts the real ceiling.
+# We only ever touch these two sonames -- they are the AOSP USB HAL, they are
+# optional, and their absence is a perfectly normal result (not an error).
+HAL_LIBS="libalsautils.so libalsautilsv2.so"
+HAL_DIRS="
+/odm/lib64
+/odm/lib
+/vendor/lib64
+/vendor/lib
+/system/vendor/lib64
+/system/vendor/lib
+/system/lib64
+/system/lib
+"
+
+# =============================================================== small helpers
+log() {
+  # post-fs-data runs before the RTC is usable, so `date` happily reports 1970.
+  # A wall-clock-less marker is more honest than a timestamp from 56 years ago.
+  ts="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+  case "$ts" in
+    ""|1970-*) ts="[clock-not-set-yet]" ;;
+  esac
+  line="$ts $*"
+  printf '%s\n' "$line" >> "$LOG" 2>/dev/null
+  printf '%s\n' "$line"
+}
+
+ensure_dirs() {
+  mkdir -p "$STATE/stock" "$STATE/patched" 2>/dev/null
+  chmod 0755 "$STATE" "$STATE/stock" "$STATE/patched" 2>/dev/null
+}
+
+json_escape() {
+  awk 'BEGIN{ORS=""} {gsub(/[\\]/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/," "); print $0 "\\n"}'
+}
+
+flatten() { printf '%s' "$1" | tr '/.' '__'; }
+
+is_ours() { [ -r "$1" ] && grep -q "$MARKER" "$1" 2>/dev/null; }
+
+is_mounted() {
+  awk -v t="$1" '$2 == t { found = 1 } END { exit !found }' "$MOUNTS" 2>/dev/null
+}
+
+# The two layers are verified completely differently: a policy XML carries our
+# text marker, a HAL library can never carry it -- there we look for the rate
+# table instead.  Everything that asks "is this target live?" goes through here.
+is_hal_target() { case "$1" in *.so) return 0 ;; esac; return 1; }
+
+is_hal_unlocked() {
+  [ -r "$HALPATCH" ] || return 1
+  sh "$HALPATCH" --check "$1" "$MAX_RATE" >/dev/null 2>&1
+  case "$?" in 4|7) return 0 ;; esac
+  return 1
+}
+
+# which ceiling the rate table in $1 currently carries (blank = not a USB HAL)
+#
+# NOTE: the patcher prints the *stock* case ("ok (check) offset=...") on stdout
+# but every "already unlocked" case on stderr, so both streams must be captured.
+hal_ceiling() {
+  [ -r "$HALPATCH" ] || return 0
+  msg="$(sh "$HALPATCH" --check "$1" 384000 2>&1)"
+  case "$msg" in
+    *"already unlocked at 768"*) printf '%s' 768000 ;;
+    *"already unlocked at 384"*) printf '%s' 384000 ;;
+    *"already unlocked at 192"*) printf '%s' 192000 ;;
+    *"ok (check)"*)             printf '%s' 96000 ;;
+  esac
+}
+
+target_applied() {
+  is_mounted "$1" || return 1
+  if is_hal_target "$1"; then is_hal_unlocked "$1"; else is_ours "$1"; fi
+}
+
+realpath_of() {
+  rp="$(readlink -f "$1" 2>/dev/null)"
+  if [ -n "$rp" ]; then printf '%s' "$rp"; else printf '%s' "$1"; fi
+}
+
+# -------------------------------------------------------------- loaded policy
+# Which policy XML is the framework ACTUALLY reading?  AudioPolicyManager is the
+# only authority and it prints it: "Config source: <path>".
+#
+# This matters more than it sounds.  Vendors ship two or three copies -- e.g.
+# /vendor/etc/audio_policy_configuration.xml (loaded) and a much richer
+# /vendor/etc/audio/audio_policy_configuration.xml (NOT loaded, just the source
+# the first one was generated from).  Patching the copy nobody reads looks
+# successful in every log we write, and changes nothing.  Asking the framework
+# removes the guesswork on any ROM.
+#
+# audioserver does not exist yet during post-fs-data, so there the answer comes
+# from the cache written on the last run.
+# The raw text the framework reports, which is NOT always a path: AIDL HAL
+# ROMs answer "AIDL HAL" (the HAL itself carries the policy, there is no single
+# file).  Kept separate so the report can show the truth either way.
+config_source_desc() {
+  cs="$(dumpsys media.audio_policy 2>/dev/null \
+        | sed -n 's/.*Config source: *//p' | head -n1 | tr -d '\r')"
+  if [ -n "$cs" ]; then
+    printf '%s' "$cs" > "$STATE/config_source.txt" 2>/dev/null
+    printf '%s' "$cs"
+    return 0
+  fi
+  [ -r "$STATE/config_source.txt" ] && cat "$STATE/config_source.txt"
+  return 0
+}
+
+loaded_policy_file() {
+  lp="$(config_source_desc)"
+  case "$lp" in
+    /*) ;;                       # a real absolute path -- usable
+    *)  printf ''; return 0 ;;   # "AIDL HAL", empty, or anything else
+  esac
+  printf '%s' "$lp" > "$STATE/loaded_policy.path" 2>/dev/null
+  printf '%s' "$lp"
+  return 0
+}
+
+load_conf() {
+  [ -r "$CONF" ] && . "$CONF"
+  case "$MIXER_RATE" in 44100|48000) ;; *) MIXER_RATE=48000 ;; esac
+  ok=0
+  for r in $ALL_RATES; do [ "$r" = "$MAX_RATE" ] && ok=1; done
+  [ "$ok" = 1 ] || MAX_RATE=384000
+  case "$ENABLED"  in 0|1) ;; *) ENABLED=1 ;; esac
+  case "$RESTART"  in 0|1) ;; *) RESTART=1 ;; esac
+  case "$HAL_PATCH" in 0|1) ;; *) HAL_PATCH=1 ;; esac
+  ok=0
+  for b in $ALL_BITS; do [ "$b" = "$BIT_DEPTH" ] && ok=1; done
+  [ "$ok" = 1 ] || BIT_DEPTH=32
+  return 0
+}
+
+save_conf() {
+  ensure_dirs
+  cat > "$CONF" <<EOF
+# HiFi SRC Bypass : settings
+# MIXER_RATE : global mixer rate. 48000 = factory (safe), 44100 = align a 44.1k library
+MIXER_RATE=$MIXER_RATE
+# MAX_RATE   : HiFi / USB direct ceiling. 384000 = high-tier DAC, 96000 = 96k tier
+MAX_RATE=$MAX_RATE
+# BIT_DEPTH  : ceiling for the USB / wired output bit depth (16 / 24 / 32).
+#              16 = do not extend at all, 32 = 16 + 24 + 32 (default)
+BIT_DEPTH=$BIT_DEPTH
+# ENABLED    : 1 = patch mounted, 0 = factory policy in use
+ENABLED=$ENABLED
+# RESTART    : 1 = restart the audio stack right after applying, 0 = reboot later
+RESTART=$RESTART
+# HAL_PATCH  : 1 = also reorder the USB HAL's own sample-rate table
+#              (libalsautils{,v2}.so), which is a *lower* ceiling than the
+#              policy XML and the usual reason a dongle stays at 96 kHz.
+#              0 = policy XML only.
+HAL_PATCH=$HAL_PATCH
+EOF
+  chmod 0644 "$CONF" 2>/dev/null
+}
+
+# ====================================================== policy file discovery
+# One candidate = one XML that lives on the phone and has <mixPort>/<devicePort>
+# in it.  <xi:include href="..."> is followed one level, because Qualcomm HIDL
+# ROMs split the a2dp module out into its own file.
+scan_candidates() {
+  found=""
+  # the file the framework really reads goes first -- see loaded_policy_file()
+  lp="$(loaded_policy_file)"
+  if [ -n "$lp" ] && [ -f "$PROOT$lp" ]; then found="$found $PROOT$lp"; fi
+  for f in $FIXED_CANDIDATES; do
+    [ -f "$PROOT$f" ] && found="$found $PROOT$f"
+  done
+  # Vendor policy files do not all start with "audio_policy_configuration":
+  # AOSP itself ships usb_ / a2dp_ / r_submix_ / bluetooth_ / hearing_aid_
+  # variants, and they are pulled into the main document with <xi:include>.
+  # Matching *_audio_policy_configuration.xml as well means the USB module is
+  # found even if the include is spelled unusually or lives in a subdirectory.
+  for root in /odm /vendor /system/vendor /product /system/etc /system/product/etc; do
+    [ -d "$PROOT$root" ] || continue
+    hit="$(find "$PROOT$root" -maxdepth 6 -type f \
+             \( -name 'audio_policy_configuration*.xml' \
+                -o -name '*_audio_policy_configuration.xml' \
+                -o -name 'audio_module_config_*.xml' \) \
+             2>/dev/null)"
+    [ -n "$hit" ] && found="$found $hit"
+  done
+
+  # one level of <xi:include>.  The spec forbids nesting, so one level is all
+  # there can be -- but the href may still be absolute or contain a directory.
+  for f in $found; do
+    [ -r "$f" ] || continue
+    inc="$(sed -n 's/.*<xi:include[^>]*href="\([^"]*\)".*/\1/p' "$f" 2>/dev/null)"
+    for h in $inc; do
+      case "$h" in
+        *://*|"") continue ;;
+        /*)       [ -f "$PROOT$h" ] && found="$found $PROOT$h"; continue ;;
+      esac
+      d="$(dirname "$f")"
+      [ -f "$d/$h" ] && found="$found $d/$h"
+    done
+  done
+
+  # second layer: the AOSP USB HAL libraries
+  if [ "$HAL_PATCH" = 1 ]; then
+    for d in $HAL_DIRS; do
+      for l in $HAL_LIBS; do
+        [ -f "$PROOT$d/$l" ] && found="$found $PROOT$d/$l"
+      done
+    done
+  fi
+
+  # normalise + dedupe, keeping the first spelling we saw
+  #
+  # `stub_audio_policy_configuration.xml` is an AOSP *placeholder* (one dummy
+  # mixPort) that several ROMs ship alongside the real policy.  Patching it
+  # achieves nothing and only adds a bind mount, so skip it by name.
+  seen=""
+  for f in $found; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in
+      *stub*) continue ;;
+    esac
+    rp="$(realpath_of "$f")"
+    case " $seen " in *" $rp "*) continue ;; esac
+    seen="$seen $rp"
+    printf '%s\n' "$rp"
+  done
+}
+
+refresh_targets() {
+  ensure_dirs
+  scan_candidates > "$CACHE.tmp" 2>/dev/null
+  mv -f "$CACHE.tmp" "$CACHE" 2>/dev/null
+}
+
+# the list of policy files worth patching, cached between calls so that the
+# WebUI's polling does not run `find` over /vendor every second
+candidate_list() {
+  if [ -s "$CACHE" ]; then
+    stale=0
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      [ -f "$f" ] || stale=1
+    done < "$CACHE"
+    [ "$stale" = 0 ] && { cat "$CACHE"; return 0; }
+  fi
+  refresh_targets
+  [ -s "$CACHE" ] && cat "$CACHE"
+  return 0
+}
+
+# --------------------------------------------------------------- SELinux
+# Borrow the label of a sibling file -- never hard-code it, the label differs
+# between /odm (OnePlus / Qualcomm AIDL) and /vendor (everything older), and
+# between an XML policy (vendor_configs_file) and a shared library
+# (vendor_file).  Getting this wrong is exactly how a patched library ends up
+# unreadable by audioserver (avc: denied read).
+ref_context_for() {
+  live="$1"
+  d="$(dirname "$live")"
+  ext="${live##*.}"
+  c=""
+  # 1. the file we are overlaying -- its own label is by definition correct
+  c="$(ls -Zd "$live" 2>/dev/null | awk '{print $1}')"
+  case "$c" in u:*) printf '%s' "$c"; return 0 ;; esac
+  # 2. a sibling of the same kind (.so next to .so, xml next to xml)
+  ref=""
+  for f in "$d"/*."$ext"; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$live" ] && continue
+    ref="$f"; break
+  done
+  # 3. any sibling at all, then the directory itself
+  if [ -z "$ref" ]; then
+    for f in "$d"/*; do
+      [ -e "$f" ] || continue
+      [ "$f" = "$live" ] && continue
+      ref="$f"; break
+    done
+  fi
+  [ -n "$ref" ] || ref="$d"
+  c="$(ls -Zd "$ref" 2>/dev/null | awk '{print $1}')"
+  case "$c" in u:*) printf '%s' "$c"; return 0 ;; esac
+  # 4. last resort: the standard label for that file kind
+  case "$ext" in
+    so) printf '%s' "u:object_r:vendor_file:s0" ;;
+    *)  printf '%s' "u:object_r:vendor_configs_file:s0" ;;
+  esac
+}
+
+# ============================================================ global mount ns
+enter_global_ns() {
+  [ "${HIFI_NS:-}" = "done" ] && return 0
+  self_ns="$(readlink /proc/self/ns/mnt 2>/dev/null)"
+  init_ns="$(readlink /proc/1/ns/mnt 2>/dev/null)"
+  if [ -n "$self_ns" ] && [ "$self_ns" = "$init_ns" ]; then
+    HIFI_NS=done; export HIFI_NS; return 0
+  fi
+  if command -v nsenter >/dev/null 2>&1; then
+    HIFI_NS=done
+    export HIFI_NS
+    exec nsenter -t 1 -m -- "$SELF" "$@"
+  fi
+  log "! cannot enter the global mount namespace, audioserver may not see the patch"
+  return 0
+}
+
+# ============================================================== generate patch
+# Patch one file.  $1 = live path, $2 = patched output, $3 = stock archive.
+# Echoes nothing; sets GEN_RC (0 = changed and verified, 3 = no patchable port,
+# 4 = nothing to change, 1 = rejected).
+gen_one() {
+  case "$1" in
+    *.so) gen_hal "$@" ;;
+    *)    gen_policy "$@" ;;
+  esac
+}
+
+# A HAL library is "already unlocked" when the stock rate table is gone.  The
+# patcher's --check mode answers that without writing anything; is_hal_unlocked
+# above maps exit 4 (same ceiling) and 7 (a different ceiling) to "unlocked".
+
+gen_hal() {
+  live="$1"; out="$2"; stk="$3"
+  GEN_RC=1
+  if [ -z "$HALPATCH" ] || [ ! -r "$HALPATCH" ]; then
+    log "! HAL patcher missing ($HALPATCH)"
+    return 1
+  fi
+
+  # archive the factory library exactly once -- and never archive one that is
+  # already unlocked, or restore would put back the wrong thing
+  made_archive=0
+  if [ ! -e "$stk" ]; then
+    if is_hal_unlocked "$live"; then
+      log "! $live already carries an unlocked rate table; not archiving it"
+      GEN_RC=4
+      return 4
+    fi
+    cp -f "$live" "$stk" 2>/dev/null || { log "! cannot archive $live"; return 1; }
+    chmod 0644 "$stk" 2>/dev/null
+    made_archive=1
+  fi
+
+  sh "$HALPATCH" "$stk" "$out" "$MAX_RATE" > "$STATE/.hal.out" 2> "$STATE/.hal.err"
+  rc=$?
+  case "$rc" in
+    0) : ;;
+    # 3 / 6 mean this library will never be patched, so the archive we just
+    # made for it is dead weight -- drop it again, or `hifi files` ends up
+    # listing archives that belong to nothing
+    3) [ "$made_archive" = 1 ] && rm -f "$stk"
+       GEN_RC=3; return 3 ;;
+    4) GEN_RC=4; return 4 ;;
+    6) log "! $live: the rate table occurs more than once -- refusing to guess"
+       rm -f "$out"; [ "$made_archive" = 1 ] && rm -f "$stk"
+       GEN_RC=6; return 6 ;;
+    # 7 = the copy we were about to patch is itself already unlocked.  That can
+    # only mean the archive is not a factory library (e.g. it was produced by an
+    # older build of this module), so refuse loudly instead of mounting a
+    # library whose provenance we cannot trust -- and drop the bad archive so a
+    # later restore+apply can archive the real factory library again.
+    7) log "!! REJECTED $live: $(cat "$STATE/.hal.err" 2>/dev/null)"
+       log "   the archived copy is not a factory library; discarding it."
+       log "   recover with:  hifi restore  &&  hifi apply"
+       rm -f "$stk" "$out"; GEN_RC=1; return 1 ;;
+    *) log "! HAL patch failed on $live: $(cat "$STATE/.hal.err" 2>/dev/null)"
+       rm -f "$out"; return 1 ;;
+  esac
+
+  # the reorder is in place, so both the length and the ELF header must be
+  # bit-identical to the factory library.  If they are not, we mis-stepped.
+  sz_a="$(wc -c < "$stk" | tr -d ' ')"
+  sz_b="$(wc -c < "$out" | tr -d ' ')"
+  if [ "$sz_a" != "$sz_b" ]; then
+    log "!! REJECTED $live (size changed $sz_a -> $sz_b)"
+    rm -f "$out"; GEN_RC=1; return 1
+  fi
+  hd_a="$(dd if="$stk" bs=1 count=16 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  hd_b="$(dd if="$out" bs=1 count=16 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  if [ "$hd_a" != "$hd_b" ]; then
+    log "!! REJECTED $live (ELF header changed)"
+    rm -f "$out"; GEN_RC=1; return 1
+  fi
+
+  chmod 0644 "$out" 2>/dev/null
+  chown 0:0 "$out" 2>/dev/null
+  ctx="$(ref_context_for "$live")"
+  [ -n "$ctx" ] && chcon "$ctx" "$out" 2>/dev/null
+
+  GEN_RC=0
+  return 0
+}
+
+gen_policy() {
+  live="$1"; out="$2"; stk="$3"
+  GEN_RC=1
+
+  # archive the factory file exactly once -- and never archive something that
+  # is already ours, or the archive would be poisoned
+  made_archive=0
+  if [ ! -e "$stk" ]; then
+    if is_ours "$live"; then
+      log "! $live already carries a patched policy; not archiving it"
+      return 1
+    fi
+    cp -f "$live" "$stk" 2>/dev/null || { log "! cannot archive $live"; return 1; }
+    chmod 0644 "$stk" 2>/dev/null
+    made_archive=1
+  fi
+
+  awk -v MARKER="$MARKER" -v MIXER="$MIXER_RATE" -v CEIL="$MAX_RATE" -v BITS="$BIT_DEPTH" \
+      -v VER="$MODVER" -v STOCKPATH="$live" \
+      -f "$PATCHER" "$stk" > "$out.tmp" 2> "$STATE/.patch.err"
+  rc=$?
+  if [ "$rc" = 3 ]; then
+    rm -f "$out.tmp"
+    # this file will never be patched, so an archive of it is dead weight
+    [ "$made_archive" = 1 ] && rm -f "$stk"
+    GEN_RC=3
+    return 3
+  fi
+  if [ "$rc" = 4 ]; then
+    rm -f "$out.tmp" "$out"
+    [ "$made_archive" = 1 ] && rm -f "$stk"
+    GEN_RC=4
+    return 4
+  fi
+  if [ "$rc" != 0 ]; then
+    log "! policy generator failed on $live: $(cat "$STATE/.patch.err" 2>/dev/null)"
+    rm -f "$out.tmp"
+    return 1
+  fi
+
+  # ---- structure check: refuse to mount anything that is not a pure
+  #      profile-level rewrite of the factory file
+  chk="$(awk -v MARKER="$MARKER" -f "$CHECKER" "$stk" "$out.tmp" 2>&1)"
+  crc=$?
+  if [ "$crc" != 0 ]; then
+    log "!! REJECTED $live"
+    printf '%s\n' "$chk" | while IFS= read -r l; do [ -n "$l" ] && log "   $l"; done
+    rm -f "$out.tmp"
+    return 1
+  fi
+
+  mv -f "$out.tmp" "$out" || { GEN_RC=1; return 1; }
+  chmod 0644 "$out" 2>/dev/null
+  chown 0:0 "$out" 2>/dev/null
+  ctx="$(ref_context_for "$live")"
+  [ -n "$ctx" ] && chcon "$ctx" "$out" 2>/dev/null
+
+  GEN_RC=0
+  return 0
+}
+
+# prepare every patchable policy file; writes $TGT and $REPORT
+prepare() {
+  ensure_dirs
+  MODVER="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1)"
+  [ -n "$MODVER" ] || MODVER="?"
+
+  refresh_targets
+  : > "$TGT.tmp"
+  : > "$REPORT.tmp"
+  n_all=0; n_ok=0; n_skip=0; n_pol=0; n_hal=0
+
+  for f in $(candidate_list); do
+    n_all=$((n_all + 1))
+    flat="$(flatten "$f")"
+    case "$f" in
+      *.so) kind=hal ;;
+      *)    kind=policy ;;
+    esac
+    if gen_one "$f" "$STATE/patched/$flat" "$STATE/stock/$flat"; then
+      n_ok=$((n_ok + 1))
+      printf '%s|%s|%s\n' "$f" "$STATE/patched/$flat" "$STATE/stock/$flat" >> "$TGT.tmp"
+      if [ "$kind" = hal ]; then
+        n_hal=$((n_hal + 1))
+        printf 'PATCHED  %s\n         HAL sample-rate table unlocked to %s Hz\n' \
+               "$f" "$MAX_RATE" >> "$REPORT.tmp"
+      else
+        n_pol=$((n_pol + 1))
+        ports="$(sed -n "s/.*$MARKER | ports=\([^|]*\)|.*/\1/p" "$STATE/patched/$flat" 2>/dev/null | head -n1)"
+        printf 'PATCHED  %s\n         ports:%s\n' "$f" "$ports" >> "$REPORT.tmp"
+      fi
+    else
+      rc="${GEN_RC:-1}"
+      if [ "$kind" = hal ]; then
+        case "$rc" in
+          3) printf 'SKIPPED  %s  (this library does not use the AOSP USB HAL rate table)\n' "$f" >> "$REPORT.tmp" ;;
+          4) printf 'SKIPPED  %s  (HAL ceiling already unlocked)\n' "$f" >> "$REPORT.tmp" ;;
+          6) printf 'SKIPPED  %s  (rate table appears twice -- refused)\n' "$f" >> "$REPORT.tmp" ;;
+          *) printf 'FAILED   %s  (HAL patch refused -- see the log above)\n' "$f" >> "$REPORT.tmp" ;;
+        esac
+      else
+        case "$rc" in
+          3) printf 'SKIPPED  %s  (not an audio policy file)\n' "$f" >> "$REPORT.tmp" ;;
+          4) printf 'SKIPPED  %s  (no USB / wired / DIRECT output port WITH a rate profile)\n' "$f" >> "$REPORT.tmp" ;;
+          *) printf 'FAILED   %s  (see the log above)\n' "$f" >> "$REPORT.tmp" ;;
+        esac
+      fi
+      n_skip=$((n_skip + 1))
+    fi
+  done
+
+  mv -f "$TGT.tmp" "$TGT" 2>/dev/null
+  mv -f "$REPORT.tmp" "$REPORT" 2>/dev/null
+  log "scan: $n_all candidate(s) -> $n_pol policy + $n_hal HAL patched, $n_skip skipped (mixer=$MIXER_RATE ceiling=$MAX_RATE bits=$BIT_DEPTH hal=$HAL_PATCH)"
+
+  if [ "$n_ok" = 0 ]; then
+    log "! nothing patchable was found -- this ROM exposes neither a USB / wired /"
+    log "  DIRECT output port in any XML policy file, nor the AOSP USB HAL library,"
+    log "  so the module would do nothing here.  Run 'hifi scan' and 'hifi ports'"
+    log "  and report the output."
+    return 1
+  fi
+  if [ "$n_pol" = 0 ]; then
+    log "! note: no XML audio policy was patchable; only the USB HAL table was."
+    log "  The HAL table governs the hardware ceiling, so this still helps, but"
+    log "  the framework will not advertise rates above the factory policy."
+    log "  A common reason for this: the ROM declares its USB output devicePorts"
+    log "  with NO <profile> at all (it lets the HAL decide the rates), so there is"
+    log "  no ceiling in the XML to lift -- only the HAL library table matters."
+  fi
+  return 0
+}
+
+# ================================================================= apply/undo
+apply_mount() {
+  # Remember what was mounted before we rebuild the list: a target that drops
+  # out of it (the user turned the HAL layer off, a ROM update removed a file)
+  # would otherwise keep its bind mount forever, because the mount loop only
+  # ever walks the *new* list.
+  old_tgt=""
+  if [ -r "$TGT" ]; then
+    old_tgt="$STATE/targets.prev"
+    cp -f "$TGT" "$old_tgt" 2>/dev/null || old_tgt=""
+  fi
+
+  prepare || return 1
+  rc=0
+  n_ok=0
+  while IFS='|' read -r live patched stk; do
+    [ -n "$live" ] || continue
+    if is_mounted "$live"; then umount "$live" 2>/dev/null; fi
+    if ! mount --bind "$patched" "$live" 2>/dev/null; then
+      log "! bind mount failed: $patched -> $live"
+      rc=1
+      continue
+    fi
+    # each layer is verified its own way: a policy XML by our text marker, a
+    # HAL library by the rate table actually present at the live path
+    if target_applied "$live"; then
+      n_ok=$((n_ok + 1))
+      if is_hal_target "$live"; then
+        log "active: $live  (USB HAL ceiling now $(hal_ceiling "$live") Hz)"
+      else
+        log "active: $live"
+      fi
+    else
+      # never leave a mount we cannot vouch for -- an unreadable vendor library
+      # is worse than no patch at all
+      log "! post-mount verification failed on $live -- unmounting it again"
+      umount "$live" 2>/dev/null
+      is_mounted "$live" && umount -l "$live" 2>/dev/null
+      rc=1
+    fi
+  done < "$TGT"
+
+  if [ -n "$old_tgt" ] && [ -r "$old_tgt" ]; then
+    while IFS='|' read -r live rest; do
+      [ -n "$live" ] || continue
+      if awk -F'|' -v t="$live" '$1 == t { f = 1 } END { exit !f }' "$TGT" 2>/dev/null; then
+        continue
+      fi
+      if is_mounted "$live"; then
+        umount "$live" 2>/dev/null
+        is_mounted "$live" && umount -l "$live" 2>/dev/null
+        log "dropped from the target list, unmounted: $live"
+      fi
+    done < "$old_tgt"
+    rm -f "$old_tgt" 2>/dev/null
+  fi
+
+  [ "$rc" = 0 ] && log "applied: $n_ok of $(count_targets) target file(s) are live"
+  return $rc
+}
+
+undo_mount() {
+  [ -r "$TGT" ] || return 0
+  while IFS='|' read -r live patched stk; do
+    [ -n "$live" ] || continue
+    if is_mounted "$live"; then
+      umount "$live" 2>/dev/null && log "patch unmounted: $live"
+    fi
+  done < "$TGT"
+
+  # A file-level bind can leave a *self* mount on the source copy -- observed on
+  # the OnePlus 13 as one of our own /data/adb/.../patched/* files turning into
+  # a mountpoint.  Harmless, but it belongs to us, so clean it up.
+  awk -v s="$STATE/" 'index($2, s) == 1 { print $2 }' "$MOUNTS" 2>/dev/null \
+    | while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        umount "$t" 2>/dev/null
+      done
+  # belt and braces: the bind can also be listed by source
+  [ -z "$PROOT" ] || return 0
+  for d in /proc/[0-9]*; do
+    [ -r "$d/mounts" ] || continue
+    while IFS='|' read -r live patched stk; do
+      [ -n "$patched" ] || continue
+      if awk -v p="$patched" '$1 == p { exit 0 } END { exit 1 }' "$d/mounts" 2>/dev/null; then
+        umount -l "$live" 2>/dev/null
+      fi
+    done < "$TGT"
+  done
+  return 0
+}
+
+# --------------------------------------------------------------- audio stack
+kill_by_cmdline() {
+  pat="$1"
+  for d in /proc/[0-9]*; do
+    [ -r "$d/cmdline" ] || continue
+    c="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"
+    case "$c" in
+      *"$pat"*)
+        p="${d#/proc/}"
+        [ "$p" = "$$" ] && continue
+        kill -9 "$p" 2>/dev/null
+        ;;
+    esac
+  done
+}
+
+restart_audio() {
+  svcs="$(getprop 2>/dev/null | sed -n 's/^\[init\.svc\.\(.*\)\]: *\[.*/\1/p' | grep -i audio)"
+  log "-- restarting audio stack [${svcs:-none found}]"
+  if [ -n "$svcs" ]; then
+    for s in $svcs; do
+      case "$s" in audioserver) continue ;; esac
+      setprop ctl.restart "$s" 2>/dev/null
+    done
+    sleep 2
+    setprop ctl.restart audioserver 2>/dev/null || setprop ctl.start audioserver 2>/dev/null
+  else
+    kill_by_cmdline android.hardware.audio
+    kill_by_cmdline audioserver
+    sleep 1
+    setprop ctl.start audioserver 2>/dev/null
+  fi
+  sleep 3
+  if [ "$(getprop init.svc.audioserver)" = "running" ]; then
+    log "audioserver running"
+  else
+    log "! audioserver is not running, reboot the device to recover"
+  fi
+}
+
+# ==================================================================== reports
+usb_dac_report() {
+  cards=""
+  if [ -r "$ASOUND/cards" ]; then
+    cards="$(sed -n 's/^ *\([0-9][0-9]*\) .*USB.*/\1/p' "$ASOUND/cards")"
+  fi
+  if [ -z "$cards" ]; then
+    for d in "$ASOUND"/card[0-9]*; do
+      [ -f "$d/stream0" ] || continue
+      grep -q 'at usb-' "$d/stream0" 2>/dev/null && cards="$cards ${d##*card}"
+    done
+  fi
+  [ -z "$cards" ] && return 1
+  for n in $cards; do
+    f="$ASOUND/card$n/stream0"
+    [ -r "$f" ] || continue
+    name="$(sed -n '1{s/^Card [0-9]*: //; s/ at usb.*//; p;}' "$f")"
+    [ -n "$name" ] || name="USB Audio"
+    pb="$(sed -n '/Playback:/,/Capture:/p' "$f")"
+    ch="$(printf '%s\n' "$pb" | sed -n 's/^ *Channels: *//p' | head -n1)"
+    fm="$(printf '%s\n' "$pb" | sed -n 's/^ *Format: *//p' | sort -u | tr '\n' '/')"
+    rates="$(printf '%s\n' "$pb" | sed -n 's/^ *Rates: *//p' | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$')"
+    max=0
+    for r in $rates; do
+      [ "$r" -gt "$max" ] 2>/dev/null && max="$r"
+    done
+    [ "$max" -gt 0 ] || continue
+    printf '%s|%s|%s|%s|%s\n' "$n" "$name" "${ch:-?}" "${fm%/}" "$max"
+  done
+}
+
+cmd_dac() {
+  if usb_dac_report > "$STATE/dac.txt" 2>/dev/null && [ -s "$STATE/dac.txt" ]; then
+    while IFS='|' read -r n name ch fm mx; do
+      printf 'USB DAC #%s  %s\n  channels: %s  formats: %s  max rate: %s Hz\n' \
+             "$n" "$name" "$ch" "$fm" "$mx"
+    done < "$STATE/dac.txt"
+  else
+    printf 'no USB audio device detected (plug your dongle in and retry)\n'
+    : > "$STATE/dac.txt"
+  fi
+}
+
+rate_ceiling_of() {
+  picked=""
+  for r in $ALL_RATES; do
+    [ "$r" -le "${1:-0}" ] 2>/dev/null && picked="$r"
+  done
+  [ -n "$picked" ] || picked="${ALL_RATES%% *}"
+  printf '%s' "$picked"
+}
+
+bits_of() {
+  case "$1" in
+    *S32*|*S24_3*) printf '%s' 24 ;;
+    *S24*)         printf '%s' 24 ;;
+    *)             printf '%s' 16 ;;
+  esac
+}
+
+count_targets() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do [ -n "$live" ] && n=$((n + 1)); done < "$TGT"
+  printf '%s' "$n"
+}
+
+count_applied() {
+  n=0
+  [ -r "$TGT" ] || { printf '0'; return; }
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    is_mounted "$live" && n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
+# ---- the two layers counted separately, so the UI can say "2 policy + 1 HAL"
+
+count_hal() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    is_hal_target "$live" && n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
+count_hal_applied() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    is_hal_target "$live" || continue
+    is_mounted "$live" && n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
+hal_list() {
+  [ -r "$TGT" ] || return 0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    is_hal_target "$live" && printf '%s\n' "$live"
+  done < "$TGT"
+}
+
+# Type-aware "is it really live?" -- slower, because a HAL target is probed by
+# reading its rate table.  Used by the boot/action scripts, not by the polling
+# JSON endpoint, and by the test harness to assert the two layers independently.
+count_applied_verified() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    target_applied "$live" && n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
+count_missing() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    target_applied "$live" || n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
+targets_brief() {
+  [ -r "$TGT" ] || { printf 'none'; return; }
+  out=""
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    out="$out${out:+, }$live"
+  done < "$TGT"
+  [ -n "$out" ] || out="none"
+  printf '%s' "$out"
+}
+
+status_json() {
+  n_ok="$(count_applied)"
+  n_all="$(count_targets)"
+  applied=0
+  [ "$n_ok" -gt 0 ] 2>/dev/null && applied=1
+  backup=0
+  [ -d "$STATE/stock" ] && [ -n "$(ls -A "$STATE/stock" 2>/dev/null)" ] && backup=1
+  dac_name=""; dac_max="0"; dac_formats=""
+  usb_dac_report > "$STATE/dac.txt" 2>/dev/null
+  if [ -s "$STATE/dac.txt" ]; then
+    IFS='|' read -r _ dn _ dfm dm _ < "$STATE/dac.txt"
+    dac_name="${dn:-}"; dac_max="${dm:-0}"; dac_formats="${dfm:-}"
+  fi
+  ver="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
+  tail_txt="$(tail -n 12 "$LOG" 2>/dev/null | json_escape)"
+  old_mod=0
+  [ -d "/data/adb/modules/$OLD_ID" ] && old_mod=1
+
+  printf '{\n'
+  printf '  "version": "%s",\n' "${ver:-?}"
+  printf '  "enabled": %s,\n' "$ENABLED"
+  printf '  "applied": %s,\n' "$applied"
+  printf '  "applied_files": %s,\n' "${n_ok:-0}"
+  printf '  "total_files": %s,\n' "${n_all:-0}"
+  printf '  "hal_files": %s,\n' "$(count_hal)"
+  printf '  "hal_applied": %s,\n' "$(count_hal_applied)"
+  printf '  "hal_enabled": %s,\n' "$HAL_PATCH"
+  printf '  "backup": %s,\n' "$backup"
+  printf '  "mixer_rate": %s,\n' "$MIXER_RATE"
+  printf '  "max_rate": %s,\n' "$MAX_RATE"
+  printf '  "bit_depth": %s,\n' "$BIT_DEPTH"
+  printf '  "bit_profiles": "%s",\n' "$(bitdepth_profiles "$BIT_DEPTH")"
+  printf '  "restart": %s,\n' "$RESTART"
+  printf '  "rates": [%s],\n' "$(printf '%s' "$ALL_RATES" | tr ' ' ',')"
+  printf '  "target": "%s",\n' "$(targets_brief)"
+  printf '  "dac_name": "%s",\n' "$dac_name"
+  printf '  "dac_formats": "%s",\n' "$dac_formats"
+  printf '  "dac_max": %s,\n' "${dac_max:-0}"
+  printf '  "audioserver": "%s",\n' "$(getprop init.svc.audioserver)"
+  printf '  "sdk": "%s",\n' "$(getprop ro.build.version.sdk)"
+  printf '  "device": "%s",\n' "$(getprop ro.product.device)"
+  printf '  "old_module": %s,\n' "$old_mod"
+  printf '  "log_tail": "%s"\n' "$tail_txt"
+  printf '}\n'
+}
+
+bitdepth_profiles() {
+  case "$1" in
+    16) printf '%s' "INT_16_BIT / AUDIO_FORMAT_PCM_16_BIT (factory only)" ;;
+    24) printf '%s' "+ INT_24_BIT / AUDIO_FORMAT_PCM_24_BIT_PACKED" ;;
+    *)  printf '%s' "+ INT_24_BIT / AUDIO_FORMAT_PCM_24_BIT_PACKED + INT_32_BIT / AUDIO_FORMAT_PCM_32_BIT" ;;
+  esac
+}
+
+bits_profiles_short() {
+  case "$1" in
+    16) printf '%s' "16" ;;
+    24) printf '%s' "16+24" ;;
+    *)  printf '%s' "16+24+32" ;;
+  esac
+}
+
+do_status() {
+  ver="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
+  n_app="$(count_applied)"; n_tot="$(count_targets)"
+  if [ "$n_app" -gt 0 ] 2>/dev/null; then
+    if [ "$n_app" = "$n_tot" ]; then mnt="active  (bind-mounted, $n_app file(s))"
+    else mnt="partially active ($n_app of $n_tot file(s))"; fi
+  else
+    mnt="inactive (factory policy in use)"
+  fi
+  if [ "$HAL_PATCH" != 1 ]; then
+    hal_txt="disabled (policy XML only)"
+  elif [ "$(count_hal)" = 0 ]; then
+    hal_txt="not present on this ROM (no libalsautils*.so)"
+  elif [ "$(count_hal_applied)" != 0 ]; then
+    hal_txt="active ($(count_hal_applied) of $(count_hal) library/ies unlocked)"
+  else
+    hal_txt="inactive ($(count_hal) library/ies still at the factory ceiling)"
+  fi
+  cat <<EOF
+HiFi SRC Bypass  (universal USB / wired SRC bypass)
+  module version : ${ver:-?}
+  module id      : $MOD_ID
+  enabled        : $([ "$ENABLED" = 1 ] && echo yes || echo no)
+  policy mount   : $mnt
+  HAL layer      : $hal_txt
+  factory backup : $([ -d "$STATE/stock" ] && ls -1 "$STATE/stock" 2>/dev/null | wc -l | tr -d ' ') archived file(s)
+  mixer rate     : $MIXER_RATE Hz $([ "$MIXER_RATE" = 48000 ] && echo "(factory-typical)")
+  direct ceiling : $MAX_RATE Hz
+  bit depth      : ${BIT_DEPTH}bit -> $(bitdepth_profiles "$BIT_DEPTH")
+  ceilings avail : $ALL_RATES
+  bitdepth avail : $ALL_BITS
+  device / sdk   : $(getprop ro.product.device) / $(getprop ro.build.version.sdk)
+  selinux        : $(getenforce 2>/dev/null || echo unknown)
+  audio service  : $(getprop init.svc.audioserver)
+EOF
+  printf '\n  policy files (the framework ceiling)\n'
+  lp="$(loaded_policy_file)"
+  if [ -r "$TGT" ]; then
+    n_shown=0
+    while IFS='|' read -r live patched stk; do
+      [ -n "$live" ] || continue
+      is_hal_target "$live" && continue
+      n_shown=$((n_shown + 1))
+      if is_mounted "$live"; then s="[mounted]"; else s="[factory]"; fi
+      if [ -n "$lp" ] && [ "$live" = "$PROOT$lp" ]; then
+        printf '    %-10s %s\n               <= the framework loads THIS one\n' "$s" "$live"
+      else
+        printf '    %-10s %s\n' "$s" "$live"
+      fi
+    done < "$TGT"
+    [ "$n_shown" = 0 ] && printf '    (none -- this ROM exposes no patchable XML policy)\n'
+    csd="$(config_source_desc)"
+    if [ -n "$lp" ]; then
+      printf '    framework config source : %s\n' "$csd"
+    elif [ -n "$csd" ]; then
+      printf '    framework config source : %s\n' "$csd"
+      printf '    (not a file -- the HAL carries the policy; nothing to prefer)\n'
+    else
+      printf '    framework config source : unknown (audioserver not running yet)\n'
+    fi
+  else
+    printf '    (not scanned yet -- run: hifi apply, or: hifi scan)\n'
+  fi
+  printf '\n  USB HAL libraries (the hardware ceiling)\n'
+  if [ "$HAL_PATCH" != 1 ]; then
+    printf '    disabled -- enable with: hifi set hal 1\n'
+  elif [ -r "$TGT" ]; then
+    n_shown=0
+    while IFS='|' read -r live patched stk; do
+      [ -n "$live" ] || continue
+      is_hal_target "$live" || continue
+      n_shown=$((n_shown + 1))
+      if is_mounted "$live"; then s="[mounted]"; else s="[factory]"; fi
+      printf '    %-10s %-44s ceiling %s Hz\n' "$s" "$live" "$(hal_ceiling "$live")"
+    done < "$TGT"
+    [ "$n_shown" = 0 ] && printf '    (none found -- libalsautils{,v2}.so is absent here)\n'
+  else
+    printf '    (not scanned yet -- run: hifi apply, or: hifi scan)\n'
+  fi
+  printf '\n'
+  cmd_dac
+  printf '\n'
+  printf 'one-tap restore : hifi restore      (or the WebUI button)\n'
+  printf 'deep check      : hifi doctor       (four layers of evidence)\n'
+  printf 'full uninstall  : remove the module in your manager, all residue is wiped\n'
+}
+
+# ==================================================================== report
+# A world-readable snapshot for remote diagnosis.
+#
+# Everything useful lives where only root can read it: /data/adb is 0700 and on
+# a hardened ROM the vendor libraries cannot even be `stat`ed by the adb shell
+# (`ls -l` prints -?????????).  So the module has to *produce* the report itself
+# -- and it already runs as root at boot.  It lands in /data/local/tmp, which
+# plain `adb pull` can fetch with no root at all.
+REPORT_OUT=/data/local/tmp/hifi_src_bypass_report.txt
+
+do_report() {
+  out="${1:-$REPORT_OUT}"
+  case "$out" in
+    /*) ;;
+    *)  out="$REPORT_OUT" ;;
+  esac
+  {
+    printf '=== HiFi SRC Bypass -- device report ===\n'
+    printf 'generated    : %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'trigger      : %s\n' "${HIFI_REPORT_WHY:-manual}"
+    printf 'module dir   : %s\n' "$MODDIR"
+    printf 'state dir    : %s\n' "$STATE"
+    printf '\n-- device --\n'
+    printf 'device       : %s (%s)\n' "$(getprop ro.product.device)" "$(getprop ro.product.model)"
+    printf 'soc          : %s %s\n' "$(getprop ro.soc.model)" "$(getprop ro.board.platform)"
+    printf 'sdk          : %s\n' "$(getprop ro.build.version.sdk)"
+    printf 'rom          : %s\n' "$(getprop ro.build.display.id)"
+    printf 'selinux      : %s\n' "$(getenforce 2>/dev/null)"
+    printf 'audioserver  : %s\n' "$(getprop init.svc.audioserver)"
+    printf '\n-- settings in effect --\n'
+    sed 's/^/  /' "$CONF" 2>/dev/null
+    printf '\n-- controller status --\n'
+    do_status 2>&1
+    printf '\n-- target list --\n'
+    sed 's/^/  /' "$TGT" 2>/dev/null
+    printf '\n-- scan report (why each file was patched or skipped) --\n'
+    sed 's/^/  /' "$REPORT" 2>/dev/null
+    printf '\n-- what the framework says its config source is --\n'
+    printf '  raw      : %s\n' "$(config_source_desc 2>/dev/null)"
+    printf '  as a path: %s\n' "$(loaded_policy_file 2>/dev/null)"
+    printf '  (blank path is normal on AIDL HAL ROMs, e.g. \"Config source: AIDL HAL\")\n'
+    printf '\n-- live bind mounts --\n'
+    awk '$2 ~ /alsautils|audio_policy|audio_module_config/ { print "  " $1 " -> " $2 }' "$MOUNTS" 2>/dev/null
+    printf '\n-- USB HAL libraries on this ROM, and the ceiling in each --\n'
+    seen=""
+    for hd in $HAL_DIRS; do
+      for hl in $HAL_LIBS; do
+        hf="$PROOT$hd/$hl"
+        [ -f "$hf" ] || continue
+        # /system/vendor is a symlink to /vendor on many ROMs, so the same
+        # library shows up under two spellings -- resolve before listing it
+        hr="$(realpath_of "$hf")"
+        case " $seen " in *" $hr "*) continue ;; esac
+        seen="$seen $hr"
+        hmsg="$(sh "$HALPATCH" --check "$hr" "$MAX_RATE" 2>&1)"
+        hrc=$?
+        printf '  %-44s rc=%s %s\n' "$hr" "$hrc" "$hmsg"
+      done
+    done
+    printf '\n-- archived factory copies --\n'
+    ls -l "$STATE/stock" 2>/dev/null | sed 's/^/  /'
+    printf '\n-- log tail --\n'
+    tail -n 90 "$LOG" 2>/dev/null | sed 's/^/  /'
+    printf '\n=== end of report ===\n'
+  } > "$out" 2>&1
+  chmod 0644 "$out" 2>/dev/null
+  chown 0:0 "$out" 2>/dev/null
+  printf '%s\n' "$out"
+}
+
+do_ports() {
+  if [ ! -s "$REPORT" ]; then
+    printf 'no report yet -- run: hifi scan\n'
+    return 1
+  fi
+  printf 'policy files on this device:\n'
+  sed 's/^/  /' "$REPORT" 2>/dev/null
+  printf '\nports the patcher recognises as patchable:\n'
+  if [ -r "$TGT" ]; then
+    while IFS='|' read -r live patched stk; do
+      [ -n "$patched" ] || continue
+      case "$live" in
+        *.so)
+          printf '  %s\n      (USB HAL library -- sample-rate table, not XML ports)\n' "$live"
+          continue ;;
+      esac
+      printf '  %s\n' "$live"
+      sed -n "s/.*$MARKER | ports=\([^|]*\)|.*/    \1/p" "$patched" 2>/dev/null \
+        | tr ',' '\n' | sed 's/^/      /'
+    done < "$TGT"
+  fi
+  return 0
+}
+
+do_files() {
+  if [ ! -r "$TGT" ]; then printf 'nothing scanned yet\n'; return 1; fi
+  n_hal="$(count_hal)"
+  printf '%-10s %-7s %-44s %s\n' STATE LAYER LIVE PATCH
+  while IFS='|' read -r live patched stk; do
+    [ -n "$live" ] || continue
+    if target_applied "$live"; then s=mounted; else s=factory; fi
+    if is_hal_target "$live"; then k=HAL; else k=policy; fi
+    printf '%-10s %-7s %-44s %s\n' "$s" "$k" "$live" "$patched"
+  done < "$TGT"
+  printf '\n  policy : %s file(s)   HAL : %s library/ies\n' \
+         "$(( $(count_targets) - n_hal ))" "$n_hal"
+  printf '\narchives:\n'
+  ls -l "$STATE/stock" 2>/dev/null | sed 's/^/  /'
+}
+
+do_boot() {
+  load_conf
+  [ "$ENABLED" = 1 ] || { log "module disabled, factory policy left untouched"; return 0; }
+  enter_global_ns boot
+  apply_mount || true
+  return 0
+}
+
+do_apply() {
+  enter_global_ns apply
+  load_conf
+  # `apply` is an explicit "turn it on": clear a previous restore and persist
+  # it, otherwise a one-tap restore would silently swallow every later apply.
+  if [ "$ENABLED" != 1 ]; then
+    ENABLED=1
+    log "enabling the patch (ENABLED=1)"
+  fi
+  apply_mount || { save_conf; return 1; }
+  save_conf
+  if [ "$RESTART" = 1 ]; then
+    restart_audio
+  else
+    log "audio restart skipped, takes effect after reboot"
+  fi
+  # refresh the snapshot: otherwise it still describes the *previous* boot,
+  # which is exactly the wrong thing to hand to whoever is debugging
+  do_report >/dev/null 2>&1
+  return 0
+}
+
+do_restore() {
+  enter_global_ns restore
+  load_conf
+  log "=== one-tap restore: going back to the factory audio policy ==="
+  undo_mount || true
+  ENABLED=0
+  save_conf
+  # the factory file was never written to; but if something else overwrote it,
+  # put the archive back
+  if [ -r "$TGT" ]; then
+    while IFS='|' read -r live patched stk; do
+      [ -n "$live" ] || continue
+      if [ ! -e "$live" ] && [ -r "$stk" ]; then
+        log "! $live disappeared -- restoring it from the archive"
+        cp -f "$stk" "$live" 2>/dev/null && log "factory file written back: $live"
+      fi
+    done < "$TGT"
+  fi
+  log "factory policy is in use again; the module stays installed but inert"
+  log "re-enable with: hifi apply   (or the WebUI button)"
+  if [ "$RESTART" = 1 ]; then
+    restart_audio
+  else
+    log "audio restart skipped, takes effect after reboot"
+  fi
+  do_report >/dev/null 2>&1
+  return 0
+}
+
+do_set() {
+  key="${1:-}"; val="${2:-}"
+  case "$key" in
+    mixer|mixer_rate)
+      case "$val" in 44100|48000) MIXER_RATE="$val" ;;
+        *) echo "mixer must be 44100 or 48000"; return 1 ;; esac ;;
+    max|max_rate)
+      ok=0
+      for r in $ALL_RATES; do [ "$r" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "max must be one of: $ALL_RATES"; return 1; }
+      MAX_RATE="$val" ;;
+    bitdepth|bits|bit_depth)
+      ok=0
+      for b in $ALL_BITS; do [ "$b" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "bitdepth must be one of: $ALL_BITS"; return 1; }
+      BIT_DEPTH="$val" ;;
+    enabled|enable)
+      case "$val" in 1|on|true) ENABLED=1 ;; 0|off|false) ENABLED=0 ;;
+        *) echo "enabled must be 0 or 1"; return 1 ;; esac ;;
+    restart)
+      case "$val" in 1|0) RESTART="$val" ;;
+        *) echo "restart must be 0 or 1"; return 1 ;; esac ;;
+    hal|hal_patch)
+      case "$val" in
+        1|on|true)   HAL_PATCH=1 ;;
+        0|off|false) HAL_PATCH=0 ;;
+        *) echo "hal must be 0 or 1"; return 1 ;;
+      esac ;;
+    *) echo "unknown key: $key"; return 1 ;;
+  esac
+  # turning the HAL layer on/off changes which files are even candidates.
+  # Only the candidate cache is dropped -- targets.lst is left alone, because
+  # `hifi restore` still needs it to unmount the currently active targets.
+  case "$key" in
+    hal|hal_patch) rm -f "$CACHE" 2>/dev/null ;;
+  esac
+  save_conf
+  printf '%s = %s\n' "$key" "$val"
+  case "$key" in
+    max|max_rate|bitdepth|bits|bit_depth|hal|hal_patch)
+      printf 'run: hifi apply   (and, for a changed ceiling, hifi restore first)\n' ;;
+  esac
+  return 0
+}
+
+do_preset() {
+  case "${1:-}" in
+    auto|detect|highest)
+      rep="$(usb_dac_report 2>/dev/null)"
+      if [ -z "$rep" ]; then
+        echo "自动识别失败：没有检测到 USB 音频设备。"
+        echo "  请先插好小尾巴（或拔插一次），再重试；也可以手动选档位。"
+        return 1
+      fi
+      line="$(printf '%s\n' "$rep" | head -n1)"
+      dn="$(printf '%s' "$line" | cut -d'|' -f2)"
+      dfm="$(printf '%s' "$line" | cut -d'|' -f4)"
+      dmax="$(printf '%s' "$line" | cut -d'|' -f5)"
+      new_max="$(rate_ceiling_of "$dmax")"
+      new_bits="$(bits_of "$dfm")"
+      MIXER_RATE=48000; MAX_RATE="$new_max"; BIT_DEPTH="$new_bits"; ENABLED=1
+      msg="自动识别：$dn
+  上报能力 : 最高 ${dmax} Hz / $dfm
+  已配置   : 采样率上限 ${new_max} Hz / 位深 ${new_bits} bit / 混音 48000 Hz
+  （策略档位取的是\"不超过解码器上报值\"的最大档；位深取的是它支持的最高位深）"
+      [ "$dmax" -gt "$new_max" ] 2>/dev/null && msg="$msg
+  注意     : 解码器上报 ${dmax} Hz 高于本模块最高档 ${new_max} Hz，已按 ${new_max} Hz 配置。"
+      ;;
+    384k|cx31993|max|hifi)
+      MIXER_RATE=48000; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
+      msg="384 kHz 满血模式 - CX31993 / 支持 384k 的 USB 小尾巴（位深 32bit）" ;;
+    192k|master|safe|compat)
+      MIXER_RATE=48000; MAX_RATE=192000; BIT_DEPTH=24; ENABLED=1
+      msg="192 kHz 超清母带 Master 档 - 上限 192k 的设备（位深 24bit）" ;;
+    96k)
+      MIXER_RATE=48000; MAX_RATE=96000; BIT_DEPTH=24; ENABLED=1
+      msg="96 kHz 高清臻音模式 - 96k/24bit 档" ;;
+    44k|44100|src)
+      MIXER_RATE=44100; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
+      msg="44.1 kHz 全局对齐 - 曲库以 44.1k 为主时消除系统重采样" ;;
+    *)
+      echo "preset must be one of: auto | 384k | 192k | 96k | 44k"
+      echo "  auto / detect  : 自动识别小尾巴上限并配置（推荐）"
+      echo "  384k / cx31993 : MAX_RATE=384000 MIXER_RATE=48000 BIT_DEPTH=32"
+      echo "  192k / master  : MAX_RATE=192000 MIXER_RATE=48000 BIT_DEPTH=24"
+      echo "  96k            : MAX_RATE=96000  MIXER_RATE=48000 BIT_DEPTH=24"
+      echo "  44k            : MAX_RATE=384000 MIXER_RATE=44100 BIT_DEPTH=32"
+      return 1 ;;
+  esac
+  save_conf
+  echo "$msg"
+  echo "applying..."
+  do_apply
+}
+
+do_verify() {
+  printf 'config        : mixer=%s ceiling=%s bits=%s enabled=%s\n' \
+         "$MIXER_RATE" "$MAX_RATE" "$BIT_DEPTH" "$ENABLED"
+  printf 'policy files  : %s\n' "$(targets_brief)"
+  printf 'mounted       : %s of %s\n' "$(count_applied)" "$(count_targets)"
+  n=0
+  if [ -r "$TGT" ]; then
+    while IFS='|' read -r live patched stk; do
+      [ -n "$live" ] || continue
+      n=$((n + 1))
+      printf '\n--- [%s] %s\n' "$n" "$live"
+      if is_mounted "$live"; then printf '    mount      : active\n'; else printf '    mount      : inactive\n'; fi
+      if is_hal_target "$live"; then
+        printf '    layer      : USB HAL library -- sample-rate table (layer 2)\n'
+        printf '    ceiling    : %s Hz  (what the HAL advertises as its maximum)\n' "$(hal_ceiling "$live")"
+        printf '    probe      : %s\n' \
+               "$(sh "$HALPATCH" --check "$live" "$MAX_RATE" 2>&1 | tail -n1)"
+        continue
+      fi
+      [ -r "$live" ] || continue
+      printf '    marker     : %s line(s)\n' "$(grep -c "$MARKER" "$live" 2>/dev/null)"
+      printf '    dialect    : %s\n' "$(sed -n "s/.*| dialect=\([a-z]*\) |.*/\1/p" "$live" 2>/dev/null | head -n1)"
+      printf '    patched    : %s\n' "$(sed -n "s/.*$MARKER | ports=\([^|]*\)|.*/\1/p" "$live" 2>/dev/null | head -n1)"
+      # report the ceiling actually present in every USB / wired port
+      awk -v ceil="$MAX_RATE" -v mst="$MARKER" '
+        /^[ \t]*<devicePort/ {
+          tag = ""
+          if (match($0, /tagName="[^"]*"/)) { tag = substr($0, RSTART+9, RLENGTH-10) }
+          if (tag == "") { if (match($0, /type="[^"]*"/)) tag = substr($0, RSTART+6, RLENGTH-7) }
+          cur = tag
+        }
+        /^[ \t]*<profile/ {
+          r = ""
+          if (match($0, /samplingRates="[^"]*"/)) r = substr($0, RSTART+15, RLENGTH-16)
+          f = ""
+          if (match($0, /pcmType="[^"]*"/))  f = substr($0, RSTART+9, RLENGTH-10)
+          else if (match($0, /format="[^"]*"/)) f = substr($0, RSTART+8, RLENGTH-9)
+          if (r == "" || f == "") next
+          if (f ~ /NON_PCM|MP3|FLAC|AAC|VORBIS|OPUS|APE/) next
+          if (cur ~ /usb|USB|wired|Wired|Headset|Headphone/) {
+            mx = 0
+            n = split(r, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] + 0 > mx) mx = a[i] + 0
+            key = cur "|" f
+            if (mx > seen[key]) seen[key] = mx
+            nk = nk + 1
+          }
+        }
+        END {
+          if (nk == 0) { print "    ports      : (none matched)"; exit }
+          for (k in seen) printf "    %-46s max %s\n", k, seen[k]
+        }
+      ' "$live" 2>/dev/null
+    done < "$TGT"
+  fi
+  printf '\n--- host view (audioserver) ---\n'
+  # dumpsys prints  `8. "direct_pcm_out"; 0x0001 (...)` -- quoted, no name=
+  dumpsys media.audio_policy 2>/dev/null \
+    | awk '/"direct_pcm_out"|"direct output"|"direct_pcm"|"hifi"/{f=1} f && /";[[:space:]]*0x/ && !/direct|hifi/{exit} f' \
+    | head -n 20
+  return 0
+}
+
+# ------------------------------------------------------------------ uninstall
+do_uninstall() {
+  log "=== uninstall: removing every trace ==="
+  # 1. drop every bind mount, from the global namespace if we can reach it,
+  #    and from every other namespace that happens to hold it
+  if [ -r "$TGT" ]; then
+    while IFS='|' read -r live patched stk; do
+      [ -n "$live" ] || continue
+      nsenter -t 1 -m -- umount "$live" 2>/dev/null
+      is_mounted "$live" && umount "$live" 2>/dev/null
+      is_mounted "$live" && umount -l "$live" 2>/dev/null
+      [ -z "$PROOT" ] || continue
+      for d in /proc/[0-9]*; do
+        [ -r "$d/mounts" ] || continue
+        if awk -v t="$live" '$2 == t { found = 1 } END { exit !found }' "$d/mounts" 2>/dev/null; then
+          nsenter -t "${d#/proc/}" -m -- umount "$live" 2>/dev/null
+        fi
+      done
+      if is_mounted "$live"; then
+        log "! could not unmount $live -- REBOOT once to finish the removal"
+      fi
+    done < "$TGT"
+  fi
+
+  # 2. keep the settings in the manager log, then wipe the state dir
+  if [ -r "$CONF" ]; then
+    log "-- settings that are being removed --"
+    sed 's/^/    /' "$CONF" >> "$LOG" 2>/dev/null
+    sed 's/^/    /' "$CONF" 2>/dev/null
+    log "-- end of settings --"
+  fi
+  rm -rf "$STATE" 2>/dev/null
+  [ -e "$STATE" ] && log "! $STATE survived the wipe"
+
+  # 3. stray files we may have produced outside the state dir
+  rm -rf /data/local/tmp/hifi_src_bypass* 2>/dev/null
+  rm -f  /data/local/tmp/.hifi_probe_* 2>/dev/null
+  rm -rf /data/adb/modules_update/$MOD_ID 2>/dev/null
+
+  log "/vendor /odm /system were never written to -- the factory policy is intact"
+  log "=== uninstall finished ==="
+  return 0
+}
+
+# ==================================================================== migrate
+# Coming from the OnePlus-13-only build: adopt its settings, and warn loudly if
+# it is still installed (two modules bind-mounting the same policy file is a
+# recipe for confusion).
+migrate_old() {
+  changed=0
+  if [ ! -e "$CONF" ] && [ -r "$OLD_STATE/config.conf" ]; then
+    . "$OLD_STATE/config.conf" 2>/dev/null || true
+    MIXER_RATE="${MIXER_RATE:-48000}"
+    MAX_RATE="${MAX_RATE:-384000}"
+    BIT_DEPTH="${BIT_DEPTH:-32}"
+    ENABLED="${ENABLED:-1}"
+    RESTART="${RESTART:-1}"
+    save_conf
+    log "migrated the settings of the previous module from $OLD_STATE/config.conf"
+    changed=1
+  fi
+  if [ -d "/data/adb/modules/$OLD_ID" ]; then
+    log "! the previous module ($OLD_ID) is still installed."
+    log "  Two modules must not bind-mount the same audio policy. Please remove"
+    log "  one of them in your module manager and reboot."
+  fi
+  return $changed
+}
+
+usage() {
+  cat <<EOF
+HiFi SRC Bypass  (universal)   v1.5
+
+  hifi status              show current state + the files in use + DAC
+  hifi scan                rescan the ROM for audio policy files AND USB HAL libs
+  hifi ports               list the policy files and the ports they expose
+  hifi files               list every target, its archive and its patch
+  hifi hal                 list the USB HAL libraries and their current ceiling
+  hifi dac                 probe the connected USB dongle
+  hifi verify              inspect the live config + the audioserver view
+  hifi doctor              deep probe: is the high rate REALLY running?
+  hifi rates               list the selectable ceilings
+  hifi set mixer 44100     global mixer rate (44100 / 48000)
+  hifi set max 384000      HiFi direct ceiling (48000 - 384000)
+  hifi set bitdepth 24     USB / wired output bit-depth ceiling (16 / 24 / 32)
+  hifi set restart 1       restart the audio stack after applying (1 / 0)
+  hifi set enabled 0       boot-time intent only (advanced)
+  hifi set hal 1           also unlock the USB HAL library's own rate table (1 / 0)
+  hifi preset auto         detect the dongle ceiling and configure it (recommended)
+  hifi preset 384k         CX31993 / full-fat
+  hifi preset 192k         generic 192 kHz compatibility tier
+  hifi preset 96k          96 kHz Hi-Res Premium tier
+  hifi preset 44k          align the system mixer to a 44.1 kHz library
+  hifi apply               TURN ON : patch + mount, persists across reboots
+  hifi restore             TURN OFF: unmount, back to factory, module stays
+  hifi reset               alias of restore
+  hifi uninstall           manual full cleanup (normally run by the manager)
+  hifi log                 show the run log
+  hifi report [file]       write a world-readable diagnostic snapshot to
+                           /data/local/tmp/hifi_src_bypass_report.txt
+                           (also produced at every boot by service.sh)
+
+  There are TWO ceilings and this module lifts both.  The XML policy is what
+  the *framework* will hand out; the USB HAL library (libalsautils{,v2}.so)
+  keeps its own hard table, and that is the one the DAC actually sees.  A
+  dongle that stays at 96 kHz whatever the XML says is the HAL table talking.
+
+  BIT_DEPTH is a *ceiling* on what is added, never a removal: 16 leaves the
+  factory bit depths alone, 24 adds 24-bit, 32 adds 24-bit and 32-bit.
+  Nothing the vendor declared is ever taken away.
+EOF
+}
+
+# ======================================================================= main
+case "${1:-status}" in
+  status)     ensure_dirs; load_conf; do_status ;;
+  dac)        ensure_dirs; load_conf; cmd_dac ;;
+  json)       ensure_dirs; load_conf; status_json ;;
+  rates)      printf 'ceiling options : %s\nmixer options   : 44100 48000\nbitdepth options: %s\n' \
+                     "$ALL_RATES" "$ALL_BITS" ;;
+  scan)       ensure_dirs; load_conf; prepare || true; do_ports ;;
+  ports)      ensure_dirs; load_conf; do_ports ;;
+  files)      ensure_dirs; load_conf; do_files ;;
+  set)        ensure_dirs; load_conf; do_set "${2:-}" "${3:-}" ;;
+  preset)     ensure_dirs; load_conf; do_preset "${2:-}" ;;
+  apply)      ensure_dirs; load_conf; do_apply ;;
+  restore)    ensure_dirs; load_conf; do_restore ;;
+  reset)      ensure_dirs; load_conf; do_restore ;;
+  verify)     ensure_dirs; load_conf; do_verify ;;
+  # used by service.sh / action.sh: they must not grep for the text marker,
+  # because a HAL library can never carry one
+  applied)    enter_global_ns applied; ensure_dirs; load_conf
+              printf '%s\n' "$(count_applied_verified)" ;;
+  missing)    enter_global_ns missing; ensure_dirs; load_conf
+              printf '%s\n' "$(count_missing)" ;;
+  # a world-readable snapshot for remote diagnosis -- see do_report above
+  report)     ensure_dirs; load_conf
+              [ -r "$TGT" ] || prepare >/dev/null 2>&1
+              do_report "${2:-}" ;;
+  hal)        ensure_dirs; load_conf
+              while IFS='|' read -r live rest; do
+                [ -n "$live" ] || continue
+                is_hal_target "$live" || continue
+                printf '%s  %s Hz\n' "$live" "$(hal_ceiling "$live")"
+              done < "$TGT" 2>/dev/null
+              [ -r "$TGT" ] || printf '(nothing scanned yet)\n' ;;
+  migrate)    ensure_dirs; load_conf; migrate_old ;;
+  doctor|probe)
+              ensure_dirs; load_conf
+              if [ -r "$MODDIR/bin/probe192.sh" ]; then
+                exec sh "$MODDIR/bin/probe192.sh"
+              else
+                echo "probe192.sh not found under $MODDIR/bin" >&2
+                exit 1
+              fi ;;
+  uninstall)  ensure_dirs; load_conf; do_uninstall ;;
+  log)        tail -n 150 "$LOG" 2>/dev/null || echo "no log yet" ;;
+  boot)       ensure_dirs; do_boot ;;
+  *)          usage ;;
+esac

@@ -1,0 +1,6 @@
+# build output of the local test harness -- never shipped
+tests/out/
+__pycache__/
+*.pyc
+*.log
+.workbuddy/

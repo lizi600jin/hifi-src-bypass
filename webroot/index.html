@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HiFi SRC Bypass · 全机型 USB 直通</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <h1>HiFi SRC Bypass</h1>
+      <p class="sub">全机型 · USB 小尾巴 / 有线耳机 高解析直通 · SRC 绕过</p>
+    </div>
+    <div class="hero-badges">
+      <span id="badgeApplied" class="badge">读取中…</span>
+      <span id="badgeVersion" class="badge ghost">v—</span>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <section class="card">
+    <h2>当前状态</h2>
+    <div class="grid">
+      <div class="stat"><span class="k">补丁挂载</span><span class="v" id="stApplied">—</span></div>
+      <div class="stat"><span class="k">全局混音采样率</span><span class="v" id="stMixer">—</span></div>
+      <div class="stat"><span class="k">HiFi 直通上限</span><span class="v" id="stMax">—</span></div>
+      <div class="stat"><span class="k">直通位深上限</span><span class="v" id="stBits">—</span></div>
+      <div class="stat"><span class="k">音频服务</span><span class="v" id="stAudio">—</span></div>
+      <div class="stat"><span class="k">机型 / SDK</span><span class="v" id="stDevice">—</span></div>
+      <div class="stat"><span class="k">生效文件</span><span class="v" id="stFiles">—</span></div>
+      <div class="stat"><span class="k">HAL 库上限</span><span class="v" id="stHal">—</span></div>
+      <div class="stat wide"><span class="k">生效文件清单</span><span class="v mono" id="stTarget">—</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>USB 解码器（小尾巴）</h2>
+      <button id="btnDac" class="btn small ghost">重新检测</button>
+    </div>
+    <div id="dacBox" class="dac">
+      <p class="muted">未检测到 USB 音频设备。插上小尾巴后点击「重新检测」。</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>一键预设</h2>
+    <div class="pills preset" id="pillPreset">
+      <button class="pill" data-p="auto">自动识别<em>读取小尾巴上限并自动配置（推荐）</em></button>
+      <button class="pill" data-p="96k">96 kHz 高清臻音<em>高清臻音</em></button>
+      <button class="pill" data-p="384k">384 kHz 满血<em>CX31993 + MAX97220</em></button>
+      <button class="pill" data-p="192k">192 kHz 超清母带<em>Master · 母带级 24bit/192k</em></button>
+      <button class="pill" data-p="44k">44.1 kHz 全局对齐<em>曲库以 44.1k 为主</em></button>
+    </div>
+    <p class="hint">点一下即完成「设置 + 应用 + 重启音频服务」，不用逐个调下面的参数。<br>
+    <strong>「自动识别」</strong>会读小尾巴对内上报的最高采样率与位深，自动挑一个不超过它、且本模块支持的档位 —— 换耳机/换小尾巴后点一下就行。</p>
+  </section>
+
+  <section class="card">
+    <h2>直通设置</h2>
+
+    <div class="field">
+      <label>全局混音采样率</label>
+      <p class="hint">系统混音器的工作频率。当它与音源一致时，AudioFlinger 会跳过自身重采样 —— 这是让<strong>所有 App</strong>都免于 SRC 的关键开关。默认档与原厂一致，最稳妥。</p>
+      <div class="pills" id="pillMixer">
+        <button class="pill" data-v="48000">48 kHz<em>默认</em></button>
+        <button class="pill" data-v="44100">44.1 kHz<em>44.1k 曲库免 SRC</em></button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>HiFi 直通上限</label>
+      <p class="hint">USB / 有线的 DIRECT 直通通道的最高采样率。按解码芯片的<strong>真实上限</strong>设置，不要盲目拉满。<br>
+      · CX31993 上限 <strong>384 kHz / 32-bit</strong>，配 MAX97220 耳放。<br>
+      · <strong>96 kHz / 24-bit</strong>：多数 96k 上限的数字小尾巴请选这一档。<br>
+      · 它真正的短板是<strong>位深</strong>：原厂通常只给 16bit，本模块补上 24/32bit 才是收益所在。</p>
+      <div class="pills rates" id="pillMax"></div>
+    </div>
+
+    <div class="field">
+      <label>直通位深上限</label>
+      <p class="hint">USB / 有线输出端口允许的<strong>位深上限</strong>。16bit 永远保留作基线，所以这是"上限"而不是"唯一"：<br>
+      · <strong>16-bit</strong> = 只留 16bit（最保守，排查用）。<br>
+      · <strong>24-bit</strong> = 16 + 24bit。96k 上限的数字小尾巴选这一档。<br>
+      · <strong>32-bit</strong> = 16 + 24 + 32bit，最宽松，默认。<br>
+      设为高于解码器能力的位深可能导致无声。</p>
+      <div class="pills" id="pillBits"></div>
+    </div>
+
+    <div class="field row">
+      <div>
+        <label>应用后自动重启音频服务</label>
+        <p class="hint">关闭则改动在下次重启手机后生效，更稳妥。</p>
+      </div>
+      <button id="btnRestart" class="switch" role="switch" aria-checked="false"><i></i></button>
+    </div>
+  </section>
+
+  <section class="actions">
+    <button id="btnApply" class="btn primary">应用并生效</button>
+    <button id="btnReset" class="btn solid-danger">一键还原</button>
+  </section>
+
+  <section class="card danger-zone">
+    <div class="card-head">
+      <h2>一键还原</h2>
+      <span class="badge ghost">无损 · 可逆</span>
+    </div>
+    <ul>
+      <li><strong>点「一键还原」</strong>＝立刻卸载绑定挂载，回到原厂音频策略，并重启音频服务。当前播放会中断，属正常现象。</li>
+      <li>还原是<strong>无损</strong>的：模块从不写入系统分区，原厂音频策略 XML 始终原封不动，只是上面盖了一层临时文件。</li>
+      <li>还原后模块仍然装着但处于停用状态，<strong>你设过的参数会保留</strong>，再点一次「应用并生效」就回到原来的配置。</li>
+      <li>想彻底清除：在 KernelSU / Magisk / APatch 里卸载本模块。卸载脚本会自动卸载挂载、清理 <code>/data/adb/hifi_src_bypass</code> 的全部残留并还原原厂策略。</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>运行日志</h2>
+      <button id="btnRefresh" class="btn small ghost">刷新</button>
+    </div>
+    <pre id="logBox" class="log">—</pre>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>自检（排障用）</h2>
+      <button id="btnDiag" class="btn small ghost">重新自检</button>
+    </div>
+    <pre id="diagBox" class="log">—</pre>
+    <p class="hint">状态读不出来时，把这里的内容截图发出来即可定位问题：它显示 WebUI 找到了哪个 root 桥接、用的是哪一种调用形式、解析到的模块目录，以及最后一条命令的原始返回（errno / stdout / stderr）。</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>深度校验（四层证据）</h2>
+      <button id="btnDoctor" class="btn small ghost">开始校验</button>
+    </div>
+    <pre id="doctorBox" class="log tall">—</pre>
+    <p class="hint">跑一次 <code>hifi doctor</code>，把「到底有没有真正生效」拆成四层证据：<br>
+    <strong>A 配置层</strong> 生效文件里端口的上限与位深 → <strong>B 系统层</strong> audioserver 读到的内容 →
+    <strong>C 能力层</strong> 解码器<em>声明</em>支持什么（<strong>不代表在跑</strong>）→
+    <strong>D 链路层</strong> 此刻真正协商出的 <code>rate</code> / <code>format</code> 与占用进程。<br>
+    <strong>D 层显示 closed 有三种完全不同的含义</strong>，会自动判定是哪一种：<br>
+    · <strong>D1</strong> 找到 0 个 pcm 目录 = 本机内核没导出这棵树（<em>不是模块没生效，改检测也没用，以 5b/5c 为准</em>）；<br>
+    · <strong>D2</strong> 有目录但全 closed = 检测时暂停了，或播放器正用自带 USB 驱动独占；<br>
+    · <strong>D3</strong> 有打开的流 = 出明细。<br>
+    5c 段会直接点名网易云 / QQ音乐 / 海贝此刻走的是<strong>直通</strong>、<strong>混音路径</strong>还是<strong>没走音频栈</strong>。</p>
+  </section>
+
+  <section class="card notes">
+    <h2>原理与边界</h2>
+    <ul>
+      <li>只替换本机<strong>原厂音频策略 XML</strong>（如 <code>/odm/etc/audio/...</code> 或 <code>/vendor/etc/...</code>），用 systemless 绑定挂载，<strong>不写入任何分区</strong>，卸载即恢复。</li>
+      <li>以<strong>本机原厂配置文件</strong>为唯一基线重建，只改采样率与位深，不增删任何混音端口 / 设备端口 / 路由；麦克风、蓝牙、扬声器、空间音频、硬件 FLAC 解码全部保持原样。</li>
+      <li>本模块把 USB / 有线的 DIRECT 直通端口上限提到你选的档位，并补齐 16 / 24 / 32-bit 三种位深 —— 网易云音乐的<strong>「独占 USB 输出」</strong>、Apple Music、QQ 音乐 Hi-Res、海贝、UAPP 等走的都是这条 DIRECT 通道。</li>
+      <li><strong>位深通常才是真瓶颈，不是采样率</strong>：原厂 USB 端口的采样率往往本就够用，却<strong>只给 16bit</strong>。所以本模块对只到 96k 的设备的收益就是「补上 24bit」。位深上限按解码器实际能力选，选高了会无声。</li>
+      <li><strong>「全局 384 kHz」在 Android 上不存在</strong>：系统混音路径必然有固定工作频率。本模块提供的是两条正交的能力 —— ① App 主动申请的独占/DIRECT 直通可达高采样率；② 把全局混音率对齐曲库以消除所有 App 的重采样。</li>
+      <li>硬件 FLAC / APE 硬解通道（<code>compress_offload_out</code>）按原厂保留，未做提升：这些解码器本身有频率上限，强行提高会导致无声。</li>
+      <li>若出现无声：点「一键还原」，或卸载模块后重启。</li>
+    </ul>
+  </section>
+
+  <footer class="foot">立子 · 全机型通用版 · v1.5</footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
