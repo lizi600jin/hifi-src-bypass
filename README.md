@@ -98,9 +98,10 @@ AudioPolicyManager 就会按静态声明重建端口。真机验证（红米 K20
 部署后：AudioOut_45 = hifi_playback, Sample rate: 192000 Hz   ← 端口被 APM 按静态 profile 重建
 ```
 
-**配套修复**：改写 AOSP 方言的策略文件时，率列表必须沿用该方言自己的分隔符
-（QTI/AIDL 用空格、AOSP/HIDL 用**逗号** —— 用错会让 AudioPolicyManager 把整串读成一个
-垃圾采样率并拒载策略，**手机直接无声**）；电话通路 `voip_rx` 一律不碰；
+**配套修复**：改写策略文件时，率列表必须沿用**该文件自己**的分隔符 ——
+这不是方言规则而是逐文件风格（AOSP 规范写空格，红米 K20 Pro 的 HIDL 文件却用**逗号**，
+一加 13 用空格，部分机型同一文件内混用；用错会让 AudioPolicyManager 把整串读成一个
+垃圾采样率并拒载策略，**手机直接无声**）。模块按文件自身推断。电话通路 `voip_rx` 一律不碰；
 以及一个块扫描 bug —— 自闭合端口（`<mixPort … />`）会把下一个端口整块吞掉并静默跳过。
 
 ### 1.4 为什么有的机器「改 XML 完全没用」
@@ -170,12 +171,13 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 |---|---|---|
 | 小米 · 红米（HyperOS，高通） | ✅ **已实测有效** | 红米 K20 Pro（SM8150）：384000 Hz / PCM_32_BIT 实时直通 |
 | 一加 · OPPO · realme（ColorOS，高通 AIDL） | ✅ **已实测有效** | 一加 13（SM8750）：384k/32bit 直通、192k/24bit + 混音 44.1k 均无异常 |
-| vivo · iQOO（OriginOS，高通 / 联发科） | ⚠️ 可能有效（未实测） | 高通平台通常沿用 AOSP 的 USB HAL 与 `libalsautils*so`，第二层大概率有目标；但 vivo 的 Hi-Fi 机型另有**自研播放通路**，那一条路径与本模块无关。是否生效，取决于该机策略里有没有可改的 USB / 有线输出 profile、以及有没有那张采样率表 |
-| 努比亚 · 红魔（nubia UI / RedMagic OS，骁龙） | ⚠️ 可能有效（未实测） | 与 O 系同属高通 AIDL 路线，策略与 HAL 布局最接近；红魔的 DTS 音效属于上层效果链，不影响本模块对两层的改造 |
+| vivo · iQOO（OriginOS / Funtouch，高通与联发科） | ➖ **大概率无需本模块**（未实测真机） | 调研结论（2026-09）：vivo/iQOO **不用 AOSP 的 `libalsautils*so`**（自研 USB HAL），第二层没有目标；但高通旗舰在 OriginOS 下 **USB DAC 原生跟随音源切换采样率、不做全局 SRC**，天玑机型则普遍锁 48k。亦即：高通平台**本来就没有 SRC 问题**，天玑平台锁死在 HAL 层 —— 两条路都轮不到本模块出手。个别 Hi-Fi 机型另有自研通路，与本模块无关 |
+| 努比亚 · 红魔（nubia UI / RedMagic OS，骁龙） | ✅ **大概率有效**（未实测真机） | 调研结论（2026-09）：沿袭 **CAF 音频栈**，策略文件就是 AOSP 那两路（HIDL `/vendor/etc/audio_policy_configuration.xml` 或 AIDL `/odm`/`/vendor` 的 AIDL 配置），**带 AOSP 的 `libalsautils.so` 与那张 52 字节采样率表** —— 与已验证的红米 K20 Pro 同一原理；`samplingRates` 用空格分隔（AOSP 规范风格，本模块按文件自身风格推断）。红魔的 DTS 音效属于上层效果链，不影响两层的改造 |
 | 荣耀（MagicOS，高通 / 联发科） | ⚠️ 可能有效（未实测） | MagicOS 基于 AOSP，策略路径与米系 / O 系接近；但荣耀保留了自家音效与调优通路，仍需以实测为准 |
 | 华为（麒麟 + 鸿蒙） | ❌ **厂商限制，预计无法生效** | 华为使用**自研音频 HAL**，通常不带 AOSP 那张采样率表，第二层没有目标；自 HarmonyOS NEXT 起已不再基于 AOSP，策略文件的格式与路径同本项目的前提完全不同，第一层也难以下手；加之其分区完整性校验更严格，systemless 挂载更容易被拒 |
 | 三星（One UI） | ⚠️ 可能有效（未实测） | 路径接近 AOSP，但三星自写音频 HAL 的比例较高，需实测确认 |
-| 谷歌 Tensor / 联发科（MTK） | ❌ **预计无法生效** | USB 硬件 offload 上限约 96k，且多数机型不带 `libalsautils*so` —— 本模块会**安全跳过**（属正常结果，不是故障） |
+| 谷歌 Tensor / 联发科（MTK） | ❌ **无法生效**（自研 HAL，无目标） | 调研结论（2026-09）：MTK 使用**自研 `MTKAudioHal`**，没有 `libalsautils*so`，两层都没有可下手的目标；USB 音频走硬性 offload，**上限约 96 kHz 且锁死**。瓶颈在 HAL/驱动层，本模块会**安全跳过**（属正常结果，不是故障） |
+| 索尼 Xperia（骁龙） | ➖ **多为原生直通，无需本模块** | 调研结论（2026-09）：骁龙平台 + 高通音频 HAL，`libalsautils.so` 在位（前提②成立）；但索尼**官方原生支持 USB Hi-Res**（Walkman 血统），USB DAC 直通本就免 SRC。老式 `audio_policy.conf` 用 `|` 分隔且非 XML，**不在本模块处理范围**（现代版本已改用 XML）。瓶颈是其音效链 |
 | Android 12 及更早 | ⚠️ 可能有效（未实测） | 多为 `type` / `format` 方言，代码已按 AOSP / HIDL 处理并有夹具测试，但缺真机数据 |
 
 > **判定口径**：能不能生效，只取决于两件事 ——

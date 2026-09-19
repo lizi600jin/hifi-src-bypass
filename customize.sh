@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================================
-# HiFi SRC Bypass - installer            v1.8
+# HiFi SRC Bypass - installer            v1.8.1
 # ------------------------------------------------------------------------------
 # Runs under Magisk / KernelSU / APatch.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 ui_print "***************************************************"
-ui_print "  HiFi SRC Bypass  (universal)   v1.8"
+ui_print "  HiFi SRC Bypass  (universal)   v1.8.1"
 ui_print "  USB / wired dongle high-res passthrough"
 ui_print "***************************************************"
 

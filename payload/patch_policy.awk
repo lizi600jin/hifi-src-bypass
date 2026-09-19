@@ -489,12 +489,18 @@ END {
   }
   DIA  = (qti >= aosp) ? "qti" : "aosp"
   FKEY = (DIA == "qti") ? "pcmType" : "format"
-  # The rate-list separator is a DIALECT convention, not a per-attribute one:
-  # QTI/AIDL writes spaces, AOSP/HIDL writes commas.  Deriving it from a single
-  # attribute is impossible anyway -- samplingRates="48000" carries no style --
-  # and getting it wrong on an AOSP file makes AudioPolicyManager read the whole
-  # list as one bogus rate, which takes the phone's audio down with it.
-  RSEP = (DIA == "qti") ? " " : ","
+  # The rate-list separator is a per-FILE style, not a dialect rule: the AOSP
+  # documentation writes spaces, yet the Redmi K20 Pro's HIDL file uses commas
+  # and its compressed_offload profile mixes spaces into a comma file.  Infer
+  # the style from the document itself: if any samplingRates attribute carries
+  # a comma, the file's dominant style is commas; otherwise spaces (which is
+  # what a [dynamic]-only or space-styled file wants).  Getting this wrong on
+  # an AOSP file makes AudioPolicyManager read the whole list as one bogus
+  # rate, which takes the phone's audio down with it.
+  RSEP = " "
+  for (i = 1; i <= N; i++) {
+    if (CLIVE[i] ~ /samplingRates="[^"]*,/) { RSEP = ","; break }
+  }
   FMIX = factory_mix()
   if (FMIX !~ /^[0-9]+$/) FMIX = 48000
 

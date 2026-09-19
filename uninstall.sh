@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================================
-# HiFi SRC Bypass   v1.8   uninstall.sh
+# HiFi SRC Bypass   v1.8.1   uninstall.sh
 #
 # Executed by Magisk / KernelSU / APatch right before the module directory is
 # deleted.  Goal: leave the device byte-identical to a stock one.
