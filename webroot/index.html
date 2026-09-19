@@ -28,6 +28,7 @@
       <div class="stat"><span class="k">补丁挂载</span><span class="v" id="stApplied">—</span></div>
       <div class="stat"><span class="k">全局混音采样率</span><span class="v" id="stMixer">—</span></div>
       <div class="stat"><span class="k">HiFi 直通上限</span><span class="v" id="stMax">—</span></div>
+      <div class="stat"><span class="k">HiFi 通道率</span><span class="v" id="stHifi">—</span></div>
       <div class="stat"><span class="k">直通位深上限</span><span class="v" id="stBits">—</span></div>
       <div class="stat"><span class="k">音频服务</span><span class="v" id="stAudio">—</span></div>
       <div class="stat"><span class="k">机型 / SDK</span><span class="v" id="stDevice">—</span></div>
@@ -55,6 +56,8 @@
       <button class="pill" data-p="384k">384 kHz 满血<em>CX31993 + MAX97220</em></button>
       <button class="pill" data-p="192k">192 kHz 超清母带<em>Master · 母带级 24bit/192k</em></button>
       <button class="pill" data-p="44k">44.1 kHz 全局对齐<em>曲库以 44.1k 为主</em></button>
+      <button class="pill" data-p="192mix">192 kHz 全局混音<em>混音器拉高 · 整数倍升采样</em></button>
+      <button class="pill" data-p="384mix">384 kHz 全局混音<em>拉满 · 高端机型</em></button>
     </div>
     <p class="hint">点一下即完成「设置 + 应用 + 重启音频服务」，不用逐个调下面的参数。<br>
     <strong>「自动识别」</strong>会读小尾巴对内上报的最高采样率与位深，自动挑一个不超过它、且本模块支持的档位 —— 换耳机/换小尾巴后点一下就行。</p>
@@ -67,9 +70,12 @@
       <label>全局混音采样率</label>
       <p class="hint">系统混音器的工作频率。当它与音源一致时，AudioFlinger 会跳过自身重采样 —— 这是让<strong>所有 App</strong>都免于 SRC 的关键开关。默认档与原厂一致，最稳妥。</p>
       <div class="pills" id="pillMixer">
-        <button class="pill" data-v="48000">48 kHz<em>默认</em></button>
-        <button class="pill" data-v="44100">44.1 kHz<em>44.1k 曲库免 SRC</em></button>
+        <button class="pill" data-v="44100">44.1 kHz<em>44.1k 曲库免 SRC（推荐）</em></button>
+        <button class="pill" data-v="48000">48 kHz<em>原厂默认</em></button>
+        <button class="pill" data-v="192000">192 kHz<em>高倍升采样</em></button>
+        <button class="pill" data-v="384000">384 kHz<em>拉满 · 高端机型</em></button>
       </div>
+      <p class="hint"><strong>注意：</strong>AudioPolicyManager 对<strong>混音输出</strong>取的是列表里的<strong>最大值</strong>，所以本模块会把混音端口重写成<strong>唯一</strong>一个你选的频率 —— 只往列表前面加一个 44.1k 是没用的，48k 仍然是最大值。请按曲库多数采样率选档。</p>
     </div>
 
     <div class="field">
@@ -79,6 +85,14 @@
       · <strong>96 kHz / 24-bit</strong>：多数 96k 上限的数字小尾巴请选这一档。<br>
       · 它真正的短板是<strong>位深</strong>：原厂通常只给 16bit，本模块补上 24/32bit 才是收益所在。</p>
       <div class="pills rates" id="pillMax"></div>
+    </div>
+
+    <div class="field">
+      <label>HiFi 通道率（USB 实际通路）</label>
+      <p class="hint">接上小尾巴后，USB 音频<strong>不走混音器</strong>，而是走厂商的 HiFi 专用端口（如 <code>hifi_playback</code>）。它原厂是「动态」的，会被钉在<strong>小尾巴上报的最大率</strong>上，于是<strong>所有音源都被上采样</strong>、没有一条能比特完美。<br>
+      <strong>请按你正在听的音源手动选档</strong>：网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz</strong>；96k 母带选 <strong>96 kHz</strong>。选对档后，该率的内容<strong>比特完美</strong>；其余率的内容会被<strong>上采样</strong>（带限插值，不丢内容）。<br>
+      <strong>关键：永远不要往下选</strong> —— 锁定的率低于音源率会发生<strong>有损下采样</strong>（超声频段被滤掉）。<code>auto</code> = 原厂行为。</p>
+      <div class="pills" id="pillHifi"></div>
     </div>
 
     <div class="field">
@@ -141,7 +155,7 @@
       <button id="btnDoctor" class="btn small ghost">开始校验</button>
     </div>
     <pre id="doctorBox" class="log tall">—</pre>
-    <p class="hint">跑一次 <code>hifi doctor</code>，把「到底有没有真正生效」拆成四层证据：<br>
+    <p class="hint">跑一次 <code>hifi doctor</code>（只跑 <code>[1]–[7]</code>），把「到底有没有真正生效」拆成四层证据：<br>
     <strong>A 配置层</strong> 生效文件里端口的上限与位深 → <strong>B 系统层</strong> audioserver 读到的内容 →
     <strong>C 能力层</strong> 解码器<em>声明</em>支持什么（<strong>不代表在跑</strong>）→
     <strong>D 链路层</strong> 此刻真正协商出的 <code>rate</code> / <code>format</code> 与占用进程。<br>
@@ -149,7 +163,23 @@
     · <strong>D1</strong> 找到 0 个 pcm 目录 = 本机内核没导出这棵树（<em>不是模块没生效，改检测也没用，以 5b/5c 为准</em>）；<br>
     · <strong>D2</strong> 有目录但全 closed = 检测时暂停了，或播放器正用自带 USB 驱动独占；<br>
     · <strong>D3</strong> 有打开的流 = 出明细。<br>
-    5c 段会直接点名网易云 / QQ音乐 / 海贝此刻走的是<strong>直通</strong>、<strong>混音路径</strong>还是<strong>没走音频栈</strong>。</p>
+    5c 段会直接点名网易云 / QQ音乐 / 海贝此刻走的是<strong>直通</strong>、<strong>混音路径</strong>还是<strong>没走音频栈</strong>。<br>
+    末尾 <code>[7]</code> 就是<strong>当前实际输出状态速览</strong>，一屏可见。<strong>换机型 / 刷入无效</strong>要发给维护者的那一段（原 <code>[8]</code>）已移到下面的<strong>「机型适配校验」</strong>。</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>机型适配校验</h2>
+      <button id="btnAdapt" class="btn small ghost">采集适配信息</button>
+    </div>
+    <pre id="adaptBox" class="log tall">—</pre>
+    <p class="hint"><strong>这一块解决什么：</strong>当你换了机型、或刷入后<strong>完全无效</strong>时，需要把「本机的病历」发给维护者。
+    它和上面的深度校验是<strong>独立的</strong>，所以深度校验窗口一打开就是实时输出状态，不用再往下翻找。<br>
+    跑的是 <code>hifi adapt</code>（等于 <code>HIFI_PROBE_SECTION=adapt hifi doctor</code>），只做检测、不改任何东西，回答三件事：<br>
+    <strong>① 这台机器到底有哪些策略文件</strong>，模块为什么补了它 / 跳过了它（含上次扫描的逐条结论）→
+    <strong>② 策略基线是什么</strong>（模块挂载的东西是从哪份原厂件生成的）→
+    <strong>③ 音频输出在系统里的真实路径</strong>（Config source 指向哪份文件、逻辑端口名、内核设备节点与声卡号）。<br>
+    反馈时请把这一整段<strong>连同上面深度校验的「排查明细」</strong>一起发回来，再补一句：型号 / 系统版本 / 小尾巴型号 / 具体现象。</p>
   </section>
 
   <section class="card notes">
@@ -165,7 +195,7 @@
     </ul>
   </section>
 
-  <footer class="foot">立子 · 全机型通用版 · v1.6</footer>
+  <footer class="foot">立子 · 全机型通用版 · v1.8</footer>
 </div>
 
 <script src="app.js"></script>

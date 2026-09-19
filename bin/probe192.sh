@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - deep verification (sampling rate + bit depth)
-#                                        probe192.sh           v1.6
+#                                        probe192.sh           v1.8
 #
 #   usage A (module installed):
 #     su -c "sh /data/adb/modules/hifi_src_bypass/bin/probe192.sh"
@@ -10,6 +10,11 @@
 #   usage B (adb push):
 #     adb push probe192.sh /data/local/tmp/
 #     adb shell su -c "sh /data/local/tmp/probe192.sh"
+#
+#   section filter (used by the WebUI to show the two halves in separate panes):
+#     HIFI_PROBE_SECTION=core   -> sections [1]..[7]   (is it really running?)
+#     HIFI_PROBE_SECTION=adapt  -> section  [8]        (device adaptation info)
+#     (unset)                   -> everything, as before
 #
 #   It reports, not guesses:
 #     * the factory policy files THIS ROM uses, and whether they are patched
@@ -37,11 +42,28 @@ POLICY_ROOT="${HIFI_FAKE_POLICY_ROOT:-}"
 PROOT="${HIFI_FAKE_ROOT:-}"
 MOUNTS="${HIFI_FAKE_MOUNTS:-/proc/mounts}"
 
+# core | adapt | "" (both).  See "section filter" above.
+SEC_FILTER="${HIFI_PROBE_SECTION:-}"
+want_core()  { [ -z "$SEC_FILTER" ] || [ "$SEC_FILTER" = core ]; }
+want_adapt() { [ -z "$SEC_FILTER" ] || [ "$SEC_FILTER" = adapt ]; }
+
 MOD_ID=hifi_src_bypass
 STATE="${HIFI_STATE_DIR:-/data/adb/$MOD_ID}"
 CONFIG="$STATE/config.conf"
 TGT="$STATE/targets.lst"
 MARKER=HIFI_SRC_BYPASS_UNIV
+
+# Section [8] is a standalone pane (HIFI_PROBE_SECTION=adapt), so it cannot
+# rely on section [1]/[1b]/[7] having run -- and `set -u` would make a bare
+# reference fatal.  Seed everything the two halves share, right here.
+# MODDIR resolves the same way section [7] used to: the controller exports it,
+# and a bare `sh probe192.sh` falls back to the script's own parent directory.
+if [ -z "${MODDIR:-}" ]; then
+  MODDIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
+fi
+[ -n "${MODDIR:-}" ] || MODDIR="/data/adb/modules/$MOD_ID"
+POLICY_FILES=""
+POLICY=""
 
 hr()  { printf '%s\n' "------------------------------------------------------------"; }
 sec() { printf '\n'; hr; printf '[%s] %s\n' "$1" "$2"; hr; }
@@ -150,7 +172,11 @@ proc_of() {
 }
 
 # ==================================================================== header
+if want_core; then
 printf 'HiFi SRC Bypass - deep verification (sampling rate + bit depth)\n'
+else
+printf 'HiFi SRC Bypass - device adaptation info (send this to the maintainer)\n'
+fi
 printf '时间 : %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 printf '机型 : %s / %s   SDK %s\n' "$(getprop ro.product.device)" \
        "$(getprop ro.product.model)" "$(getprop ro.build.version.sdk)"
@@ -170,6 +196,7 @@ case "${CONFIG_BITS:-32}" in
 esac
 
 # ==================================================== 1. module and policy files
+if want_core; then
 sec 1 "模块与生效中的策略文件"
 POLICY_FILES=""
 POLICY=""
@@ -840,6 +867,7 @@ printf '         不开独占时出现 ✅ 模块生效 / ✓ 直通 / ✓ HiFi 
 printf '         出现 ℹ️ usbfs 接管 = 独占已开（App 直连 DAC，模块在链路外，属正常形态）；\n'
 printf '         异常时把「排查明细」整段发回来可继续定位。\n'
 hr
+fi   # want_core  ->  sections [1]..[7]
 
 # ==============================================================================
 # 8. 机型适配信息
@@ -850,6 +878,7 @@ hr
 #   ② 策略基线是什么（模块挂载的东西是从哪份原厂件生成的）
 #   ③ 音频输出在系统里的真实路径（逻辑端口所属文件 + 内核设备节点 + 声卡号）
 # ==============================================================================
+if want_adapt; then
 sec 8 "机型适配信息（换机型 / 无效时请把本段整段贴给维护者）"
 
 printf '设备       : %s (%s)\n' "$(getprop ro.product.device 2>/dev/null)" "$(getprop ro.product.model 2>/dev/null)"
@@ -955,4 +984,5 @@ printf '  想一次性导出成文件的话：在管理器终端执行\n'
 printf '     sh /data/adb/modules/%s/bin/hifi report\n' "$MOD_ID"
 printf '  它会写到 /data/local/tmp/hifi_src_bypass_report.txt，无需 root 即可 adb pull 取回。\n'
 hr
+fi   # want_adapt  ->  section [8]
 exit 0

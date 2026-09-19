@@ -2,12 +2,21 @@
 # patch_policy.awk -- generic Android audio policy XML patcher
 # -----------------------------------------------------------------------------
 #   awk -v MARKER=... -v MIXER=48000 -v CEIL=384000 -v BITS=32 -v VER=1.1 \
+#       -v HIFI=192000 \
 #       -v STOCKPATH=/odm/etc/audio/audio_module_config_primary.xml \
 #       -f patch_policy.awk  <stock.xml>  >  <patched.xml>
 #
 #   exit 0 = patched output written, at least one port was modified
 #   exit 3 = not an audio policy file (no profile line with a known format)
 #   exit 4 = recognised, but nothing here needed changing
+#
+#   HIFI   : rate for a *dynamic* vendor HiFi mixPort (e.g. "hifi_playback").
+#            "auto" / unset = leave it alone (stock: the port is [dynamic], the
+#            HAL reports the DAC's own maximum and APM pins the port there).
+#            A number = give the port a *static* profile with that single rate,
+#            which overrides the dynamic query.  Verified on a Redmi K20 Pro
+#            (Android 16): the live port went 384000 -> 192000 Hz, so a 192k
+#            source plays with zero resampling instead of an upsampling 2x.
 #
 # WHY THIS EXISTS
 #   The previous generation of this module shipped a *device* template: a full
@@ -58,6 +67,17 @@ BEGIN {
   NPORT = 0
   CHANGED = 0
   BREF = 1
+  # MIX_KEEP_ALL is 0 by default: a mixer port is collapsed to the single
+  # configured rate, because AudioPolicyManager takes the MAX of the list.
+  # The caller may set -v MIX_KEEP_ALL=1 to additionally retain the factory
+  # rates, which keeps e.g. 48 kHz sources reachable at 48 kHz.
+  if (MIX_KEEP_ALL == "") MIX_KEEP_ALL = 0
+  RSEP = " "         # replaced once the dialect is known (see END)
+  # HIFI defaults to "auto": leave dynamic vendor HiFi mixPorts untouched.
+  # A numeric value turns them into statically profiled ports (see the header
+  # comment) -- the only lever that reaches the port USB audio actually plays
+  # through on Qualcomm/OnePlus style ROMs.
+  if (HIFI == "") HIFI = "auto"
 }
 
 { N++; L[N] = $0 }
@@ -97,6 +117,14 @@ function rs_add(r,   k) {
   RSET[RC] = r
 }
 
+# Which separator does THIS file use for a rate list?  The QTI/AIDL dialect
+# writes spaces ("32000 44100 48000") while the AOSP/HIDL dialect writes
+# commas ("8000,11025,...").  Re-emitting an AOSP list with spaces makes
+# AudioPolicyManager parse the whole thing as ONE bogus rate and reject the
+# config -- audioserver then never brings AudioPolicyService up and the phone
+# goes silent.  Verified the hard way on a Redmi K20 Pro (Android 16).
+# Derived from the list we were handed, so a file that mixes styles stays
+# internally consistent.
 function rs_sort_join(   i, j, key, s) {
   for (i = 2; i <= RC; i++) {
     key = RSET[i] + 0
@@ -105,7 +133,7 @@ function rs_sort_join(   i, j, key, s) {
     RSET[j + 1] = key
   }
   s = ""
-  for (i = 1; i <= RC; i++) s = s (i > 1 ? " " : "") RSET[i]
+  for (i = 1; i <= RC; i++) s = s (i > 1 ? RSEP : "") RSET[i]
   return s
 }
 
@@ -131,22 +159,28 @@ function add_rate(orig, r,   a, n, i) {
   return rs_sort_join()
 }
 
-# union(factory list, {r}) with `r` FORCED TO THE FRONT -- used for the mixer
-# mixPorts.  For a mixer output the first sampling rate of the profile is what
-# AudioFlinger actually runs at, so putting 44100 first is what does the
-# alignment; dropping the factory value entirely is not necessary.
-function mixer_first(orig, m,   a, n, i, s, res) {
+# THE mixer-rate fix.  AudioPolicyManager::pickAudioProfile() picks the
+# *maximum* sampling rate for a mixed output (only Direct / Offload take the
+# minimum), so merely prepending the wanted rate to the list does nothing --
+# 48000 is still the max and still wins.  The wanted rate therefore has to
+# become the ONLY rate in the list.  Verified on a OnePlus 13 (Android 16):
+# `44100 48000` -> the live DEEP_BUFFER MixerThread stayed at 48000 Hz;
+# `44100`      -> it dropped to 44100 Hz.
+#
+# MIX_KEEP_ALL=1 keeps the factory rates alongside the wanted one.  That is
+# only meaningful for a *device* port (a sink), which never picks by max; on a
+# mixer mixPort it would silently undo the whole fix, so the caller leaves it
+# at 0 for mixPorts.
+function mixer_only(orig, m,   a, n, i) {
   RC = 0
   rs_add(m)
-  n = split(orig, a, /[ \t]+/)
-  for (i = 1; i <= n; i++) rs_add(a[i])
-  if (RC == 0) return ""
-  s = rs_sort_join()
-  if ((s + 0) == (m + 0)) return s
-  n = split(s, a, /[ \t]+/)
-  res = m
-  for (i = 1; i <= n; i++) if ((a[i] + 0) != (m + 0)) res = res " " a[i]
-  return res
+  if (MIX_KEEP_ALL) {
+    n = split(orig, a, /[ \t]+/)
+    for (i = 1; i <= n; i++) rs_add(a[i])
+    if (RC == 0) return ""
+    return rs_sort_join()
+  }
+  return m
 }
 
 # --------------------------------------------------------------------------
@@ -269,18 +303,79 @@ function dev_class(head,   typ, tag, conn, role, tl) {
   return ""
 }
 
-function mix_class(head,   name, role, flags) {
-  name  = attr(head, "name")
-  role  = attr(head, "role")
-  flags = attr(head, "flags")
+function mix_class(B, bn,   name, role, flags, i) {
+  name  = attr(B[1], "name")
+  role  = attr(B[1], "role")
+  # `flags` is usually on the opening tag, but several ROMs -- the Redmi K20
+  # Pro's factory file among them -- wrap it onto the next line.  Classifying
+  # from the head line alone silently skipped every such port (direct_pcm and
+  # voip_rx included), so scan the whole block for it.  Nothing else inside a
+  # mixPort carries a flags attribute, so the first hit is the port's own.
+  flags = ""
+  for (i = 1; i <= bn && flags == ""; i++) flags = attr(B[i], "flags")
   if (role != "source") return ""
-  if (flags ~ /DIRECT/ && flags !~ /COMPRESS_OFFLOAD|MMAP_NOIRQ|SPATIALIZER|OFFLOAD|RAW/) return "direct"
+  if (flags ~ /DIRECT/ && flags !~ /COMPRESS_OFFLOAD|MMAP_NOIRQ|SPATIALIZER|OFFLOAD|RAW|VOIP/) return "direct"
   if ((flags ~ /PRIMARY/ && flags !~ /RAW/) || name ~ /^(low_latency|deep_buffer)/) return "mixer"
+  # A dynamic vendor HiFi port ("hifi_playback"): no flags at all, and the name
+  # carries "hifi".  Only touched when the caller asked for a static rate --
+  # this is the port USB audio actually plays through on Qualcomm/OnePlus-style
+  # ROMs, and it is the one port neither MIXER nor the HAL rate table can reach.
+  if (HIFI ~ /^[0-9]+$/ && flags == "" && name ~ /[Hh]ifi/) return "hifi"
   return ""
 }
 
 # ============================================================ block rewriting
 #
+# Fill in a *dynamic* vendor HiFi mixPort (e.g. Qualcomm/OnePlus "hifi_playback")
+# with a static profile, so AudioPolicyManager stops pinning it to whatever the
+# DAC advertises as its maximum.  The stock port is self-closing and profile
+# free, which is exactly why the policy asks the HAL at run time and then takes
+# the maximum; with a static profile in the file it takes ours instead
+# (verified on a Redmi K20 Pro, Android 16: the live port went 384000 -> 192000
+# Hz, so a 192k source plays with zero resampling instead of an upsampling 2x).
+#
+# A port the vendor already gave profiles to is NOT dynamic -- leave it alone,
+# we would only be guessing at capabilities the HAL knows better than we do.
+function emit_hifi(bn, name,   i, k, ind, head, op, b, prof, np, PLN) {
+  # dynamic means: not a single <profile> anywhere inside the block
+  for (i = 1; i <= bn; i++) if (is_pblk(i)) { for (i = 1; i <= bn; i++) out(B[i]); return }
+
+  head = B[1]
+  ind = head
+  sub(/[^ \t].*$/, "", ind)          # the port's own indentation
+  if (ind == "") ind = "                "
+
+  np = 0
+  for (b = 16; b <= 32; b += 8) {
+    if ((BITS + 0) < b) continue     # respect the user's bit-depth tier
+    if (DIA == "qti")
+      prof = ind "    <profile samplingRates=\"" HIFI "\" channelLayouts=\"LAYOUT_STEREO\" formatType=\"PCM\" pcmType=\"" fmt_name(b) "\" />"
+    else
+      prof = ind "    <profile name=\"\" format=\"" fmt_name(b) "\" samplingRates=\"" HIFI "\" channelMasks=\"AUDIO_CHANNEL_OUT_STEREO\"/>"
+    np++; PLN[np] = prof
+  }
+  if (np == 0) { for (i = 1; i <= bn; i++) out(B[i]); return }
+
+  if (bn == 1 && head ~ /\/>[ \t]*$/) {
+    # self-closing:  <mixPort ... />  ->  <mixPort ...> profiles </mixPort>
+    op = head
+    sub(/[ \t]*\/>[ \t]*$/, ">", op)
+    out(op)
+    for (k = 1; k <= np; k++) out(PLN[k])
+    out(ind "</mixPort>")
+  } else {
+    # already has a closer: insert the profiles just before </mixPort>
+    for (i = 1; i <= bn; i++) {
+      if (i == bn && CLIVE[BREF + i - 1] ~ /<\/mixPort>/) for (k = 1; k <= np; k++) out(PLN[k])
+      out(B[i])
+    }
+  }
+
+  CHANGED = 1
+  NPORT++
+  PORTS = PORTS (PORTS == "" ? "" : ",") "mix:" name "=HIFI"
+}
+
 # Work in *element* units, never in physical-line units: Qualcomm's AOSP-style
 # files wrap a single <profile> over four lines, so a line-oriented rewriter
 # would never even see the samplingRates attribute.  The original line breaks
@@ -290,6 +385,7 @@ function emit_block(bn, cls, kind, name,
                     rates, rline, pb16, pb24, pb32, old, nw, tag, v, b,
                     bs, be, cn, lastend) {
   if (cls == "") { for (i = 1; i <= bn; i++) out(B[i]); return }
+  if (cls == "hifi") { emit_hifi(bn, name); return }
 
   for (i = 1; i <= bn; i++) T[i] = B[i]
 
@@ -329,7 +425,7 @@ function emit_block(bn, cls, kind, name,
       if (cls == "direct" || cls == "usb" || cls == "wired") {
         nw = make_rates(rates, (cls == "direct" ? DIRECT_POOL : DEV_POOL), CEIL)
       } else if (cls == "mixer" && ispcm && (MIXER + 0) != (FMIX + 0)) {
-        nw = (kind == "mix") ? mixer_first(rates, MIXER) : add_rate(rates, MIXER)
+        nw = (kind == "mix") ? mixer_only(rates, MIXER) : add_rate(rates, MIXER)
       }
       if (nw != "" && nw != rates) {
         T[rline] = setattr(T[rline], "samplingRates", nw)
@@ -393,6 +489,12 @@ END {
   }
   DIA  = (qti >= aosp) ? "qti" : "aosp"
   FKEY = (DIA == "qti") ? "pcmType" : "format"
+  # The rate-list separator is a DIALECT convention, not a per-attribute one:
+  # QTI/AIDL writes spaces, AOSP/HIDL writes commas.  Deriving it from a single
+  # attribute is impossible anyway -- samplingRates="48000" carries no style --
+  # and getting it wrong on an AOSP file makes AudioPolicyManager read the whole
+  # list as one bogus rate, which takes the phone's audio down with it.
+  RSEP = (DIA == "qti") ? " " : ","
   FMIX = factory_mix()
   if (FMIX !~ /^[0-9]+$/) FMIX = 48000
 
@@ -407,21 +509,33 @@ END {
     if (CLIVE[i] ~ /^[ \t]*<mixPort[ \t>]/) {
       BREF = i
       bn = 0
-      while (i <= N) {
-        bn++; B[bn] = L[i]
-        if (CLIVE[i] ~ /<\/mixPort>/) { i++; break }
-        i++
+      if (CLIVE[i] ~ /\/>[ \t]*$/) {
+        # self-closing single-line port (e.g. stock "<mixPort name="hifi_playback"
+        # role="source" />").  Without this branch the scanner would run on
+        # until the NEXT port's </mixPort> and swallow it, silently skipping
+        # every port in between.
+        bn = 1; B[1] = L[i]; i++
+      } else {
+        while (i <= N) {
+          bn++; B[bn] = L[i]
+          if (CLIVE[i] ~ /<\/mixPort>/) { i++; break }
+          i++
+        }
       }
-      emit_block(bn, mix_class(B[1]), "mix", attr(B[1], "name"))
+      emit_block(bn, mix_class(B, bn), "mix", attr(B[1], "name"))
       continue
     }
     if (CLIVE[i] ~ /^[ \t]*<devicePort[ \t>]/) {
       BREF = i
       bn = 0
-      while (i <= N) {
-        bn++; B[bn] = L[i]
-        if (CLIVE[i] ~ /<\/devicePort>/) { i++; break }
-        i++
+      if (CLIVE[i] ~ /\/>[ \t]*$/) {
+        bn = 1; B[1] = L[i]; i++          # same self-closing case, same trap
+      } else {
+        while (i <= N) {
+          bn++; B[bn] = L[i]
+          if (CLIVE[i] ~ /<\/devicePort>/) { i++; break }
+          i++
+        }
       }
       role = attr(B[1], "role")
       cls = (role == "" || role == "sink") ? dev_class(B[1]) : ""
@@ -433,7 +547,7 @@ END {
     i++
   }
 
-  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " | generated, do not hand edit -->"
+  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " | generated, do not hand edit -->"
   hdr2 = "<!-- " MARKER " | ports=" PORTS " | repo: android audio src bypass -->"
 
   start = 1

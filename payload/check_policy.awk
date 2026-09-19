@@ -184,6 +184,28 @@ function build(f,   i, n, ln, live, t) {
       continue
     }
 
+    # ---- a self-closing container is expanded into open + close -----------
+    # The patcher may legitimately fill in a dynamic port ("<mixPort ... />"
+    # in stock becomes "<mixPort ...> profiles </mixPort>").  Profiles are
+    # dropped above, so expanding the self-closing form here is what makes the
+    # two skeletons still compare equal afterwards.  Nothing else is allowed
+    # to change shape.
+    if (live ~ /^[ \t]*<(mixPort|devicePort)[ \t>]/ && live ~ /\/>[ \t]*$/) {
+      t = norm(live)
+      sub(/[ \t]*\/>$/, ">", t)
+      if (t != "") {
+        el = t
+        sub(/^</, "", el); sub(/[ \t>].*$/, "", el)   # "mixPort" / "devicePort"
+        sn++
+        if (f == 1) S1[sn] = t; else S2[sn] = t
+        tail = t
+        sn++
+        if (f == 1) S1[sn] = "</" el ">"; else S2[sn] = "</" el ">"
+        tail = "</" el ">"
+      }
+      continue
+    }
+
     t = norm(live)
     if (t == "") continue
     sn++

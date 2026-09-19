@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - universal USB / wired SRC bypass
-#                                on-device controller            v1.6
+#                                on-device controller            v1.8
 #
 #   what it does
 #     The factory audio policy of THIS phone is located automatically -- no
@@ -79,6 +79,13 @@ MAX_RATE=384000
 BIT_DEPTH=32
 ENABLED=1
 RESTART=1
+# The vendor HiFi port ("hifi_playback"): on Qualcomm/OnePlus-style ROMs USB
+# audio plays through THIS port, not deep_buffer.  It ships as a *dynamic*
+# mixPort, so the policy pins it to whatever the DAC advertises as its maximum
+# and every source is resampled up to that.  A numeric value gives it a static
+# profile instead, which is the only lever that reaches this port (verified on
+# a Redmi K20 Pro: the live port went 384000 -> 192000 Hz).  "auto" = stock.
+HIFI_RATE=auto
 # Second layer: reorder the sample-rate table inside the AOSP USB HAL library.
 # The policy XML tells the *framework* what it may request; the HAL keeps its
 # own hard ceiling (usually 96000) and that is what actually reaches the DAC.
@@ -88,6 +95,8 @@ HAL_PATCH=1
 DIRECT_POOL="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
 USB_POOL="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
 ALL_RATES="48000 96000 176400 192000 352800 384000"
+ALL_MIXER="44100 48000 192000 384000"
+ALL_HIFI="auto 44100 48000 96000 176400 192000 352800 384000"
 ALL_BITS="16 24 32"
 
 # ------------------------------------------------------------------ candidates
@@ -235,10 +244,13 @@ loaded_policy_file() {
 
 load_conf() {
   [ -r "$CONF" ] && . "$CONF"
-  case "$MIXER_RATE" in 44100|48000) ;; *) MIXER_RATE=48000 ;; esac
+  case "$MIXER_RATE" in 44100|48000|192000|384000) ;; *) MIXER_RATE=48000 ;; esac
   ok=0
   for r in $ALL_RATES; do [ "$r" = "$MAX_RATE" ] && ok=1; done
   [ "$ok" = 1 ] || MAX_RATE=384000
+  ok=0
+  for r in $ALL_HIFI; do [ "$r" = "$HIFI_RATE" ] && ok=1; done
+  [ "$ok" = 1 ] || HIFI_RATE=auto
   case "$ENABLED"  in 0|1) ;; *) ENABLED=1 ;; esac
   case "$RESTART"  in 0|1) ;; *) RESTART=1 ;; esac
   case "$HAL_PATCH" in 0|1) ;; *) HAL_PATCH=1 ;; esac
@@ -252,10 +264,19 @@ save_conf() {
   ensure_dirs
   cat > "$CONF" <<EOF
 # HiFi SRC Bypass : settings
-# MIXER_RATE : global mixer rate. 48000 = factory (safe), 44100 = align a 44.1k library
+# MIXER_RATE : global mixer rate. 48000 = factory (safe), 44100 = align a 44.1k
+#              library, 192000 / 384000 = high-rate mixer (upsamples 44.1k/48k
+#              sources by an integer factor; heavier on the SoC and USB bus)
 MIXER_RATE=$MIXER_RATE
 # MAX_RATE   : HiFi / USB direct ceiling. 384000 = high-tier DAC, 96000 = 96k tier
 MAX_RATE=$MAX_RATE
+# HIFI_RATE  : rate for the vendor HiFi port ("hifi_playback") that USB audio
+#              actually plays through.  auto = stock (the port follows the
+#              DAC's own maximum, so every source is resampled up to it).
+#              A number pins the port to that rate: pick the rate YOUR library
+#              uses (192000 for 超清母带 / 臻品音质 masters) and that content
+#              plays bit-perfect; everything else is resampled UP, never down.
+HIFI_RATE=$HIFI_RATE
 # BIT_DEPTH  : ceiling for the USB / wired output bit depth (16 / 24 / 32).
 #              16 = do not extend at all, 32 = 16 + 24 + 32 (default)
 BIT_DEPTH=$BIT_DEPTH
@@ -524,6 +545,7 @@ gen_policy() {
   fi
 
   awk -v MARKER="$MARKER" -v MIXER="$MIXER_RATE" -v CEIL="$MAX_RATE" -v BITS="$BIT_DEPTH" \
+      -v HIFI="$HIFI_RATE" \
       -v VER="$MODVER" -v STOCKPATH="$live" \
       -f "$PATCHER" "$stk" > "$out.tmp" 2> "$STATE/.patch.err"
   rc=$?
@@ -619,7 +641,7 @@ prepare() {
 
   mv -f "$TGT.tmp" "$TGT" 2>/dev/null
   mv -f "$REPORT.tmp" "$REPORT" 2>/dev/null
-  log "scan: $n_all candidate(s) -> $n_pol policy + $n_hal HAL patched, $n_skip skipped (mixer=$MIXER_RATE ceiling=$MAX_RATE bits=$BIT_DEPTH hal=$HAL_PATCH)"
+  log "scan: $n_all candidate(s) -> $n_pol policy + $n_hal HAL patched, $n_skip skipped (mixer=$MIXER_RATE ceiling=$MAX_RATE bits=$BIT_DEPTH hifi=$HIFI_RATE hal=$HAL_PATCH)"
 
   if [ "$n_ok" = 0 ]; then
     log "! nothing patchable was found -- this ROM exposes neither a USB / wired /"
@@ -942,6 +964,7 @@ status_json() {
   printf '  "hal_enabled": %s,\n' "$HAL_PATCH"
   printf '  "backup": %s,\n' "$backup"
   printf '  "mixer_rate": %s,\n' "$MIXER_RATE"
+  printf '  "hifi_rate": "%s",\n' "$HIFI_RATE"
   printf '  "max_rate": %s,\n' "$MAX_RATE"
   printf '  "bit_depth": %s,\n' "$BIT_DEPTH"
   printf '  "bit_profiles": "%s",\n' "$(bitdepth_profiles "$BIT_DEPTH")"
@@ -1001,7 +1024,8 @@ HiFi SRC Bypass  (universal USB / wired SRC bypass)
   policy mount   : $mnt
   HAL layer      : $hal_txt
   factory backup : $([ -d "$STATE/stock" ] && ls -1 "$STATE/stock" 2>/dev/null | wc -l | tr -d ' ') archived file(s)
-  mixer rate     : $MIXER_RATE Hz $([ "$MIXER_RATE" = 48000 ] && echo "(factory-typical)")
+  mixer rate     : $MIXER_RATE Hz $([ "$MIXER_RATE" = 48000 ] && echo "(factory-typical)")$([ "$MIXER_RATE" = 44100 ] && echo "(44.1k library aligned)")$([ "$MIXER_RATE" = 192000 ] && echo "(high-rate mixer)")$([ "$MIXER_RATE" = 384000 ] && echo "(max-rate mixer)")
+  hifi port rate : $HIFI_RATE$([ "$HIFI_RATE" = auto ] && echo " (stock: follows the DAC maximum)")$([ "$HIFI_RATE" != auto ] && echo " Hz (pinned: $HIFI_RATE content is bit-perfect, the rest is resampled UP)")
   direct ceiling : $MAX_RATE Hz
   bit depth      : ${BIT_DEPTH}bit -> $(bitdepth_profiles "$BIT_DEPTH")
   ceilings avail : $ALL_RATES
@@ -1235,8 +1259,15 @@ do_set() {
   key="${1:-}"; val="${2:-}"
   case "$key" in
     mixer|mixer_rate)
-      case "$val" in 44100|48000) MIXER_RATE="$val" ;;
-        *) echo "mixer must be 44100 or 48000"; return 1 ;; esac ;;
+      ok=0
+      for r in $ALL_MIXER; do [ "$r" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "mixer must be one of: $ALL_MIXER"; return 1; }
+      MIXER_RATE="$val" ;;
+    hifirate|hifiport)
+      ok=0
+      for r in $ALL_HIFI; do [ "$r" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "hifirate must be one of: $ALL_HIFI"; return 1; }
+      HIFI_RATE="$val" ;;
     max|max_rate)
       ok=0
       for r in $ALL_RATES; do [ "$r" = "$val" ] && ok=1; done
@@ -1311,13 +1342,21 @@ do_preset() {
     44k|44100|src)
       MIXER_RATE=44100; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
       msg="44.1 kHz 全局对齐 - 曲库以 44.1k 为主时消除系统重采样" ;;
+    192mix|mix192|192kmix)
+      MIXER_RATE=192000; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
+      msg="192 kHz 全局混音 - 混音器提升到 192k，44.1k / 48k 音源走整数倍升采样（位深 32bit）" ;;
+    384mix|mix384|384kmix)
+      MIXER_RATE=384000; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
+      msg="384 kHz 全局混音 - 混音器拉满到 384k（对 SoC 与 USB 带宽压力最大，仅高端机型建议）" ;;
     *)
-      echo "preset must be one of: auto | 384k | 192k | 96k | 44k"
+      echo "preset must be one of: auto | 384k | 192k | 96k | 44k | 192mix | 384mix"
       echo "  auto / detect  : 自动识别小尾巴上限并配置（推荐）"
       echo "  384k / cx31993 : MAX_RATE=384000 MIXER_RATE=48000 BIT_DEPTH=32"
       echo "  192k / master  : MAX_RATE=192000 MIXER_RATE=48000 BIT_DEPTH=24"
       echo "  96k            : MAX_RATE=96000  MIXER_RATE=48000 BIT_DEPTH=24"
       echo "  44k            : MAX_RATE=384000 MIXER_RATE=44100 BIT_DEPTH=32"
+      echo "  192mix         : MAX_RATE=384000 MIXER_RATE=192000 BIT_DEPTH=32"
+      echo "  384mix         : MAX_RATE=384000 MIXER_RATE=384000 BIT_DEPTH=32"
       return 1 ;;
   esac
   save_conf
@@ -1460,7 +1499,7 @@ migrate_old() {
 
 usage() {
   cat <<EOF
-HiFi SRC Bypass  (universal)   v1.6
+HiFi SRC Bypass  (universal)   v1.8
 
   hifi status              show current state + the files in use + DAC
   hifi scan                rescan the ROM for audio policy files AND USB HAL libs
@@ -1470,8 +1509,12 @@ HiFi SRC Bypass  (universal)   v1.6
   hifi dac                 probe the connected USB dongle
   hifi verify              inspect the live config + the audioserver view
   hifi doctor              deep probe: is the high rate REALLY running?
+  hifi adapt               device adaptation info (send this to the maintainer)
   hifi rates               list the selectable ceilings
-  hifi set mixer 44100     global mixer rate (44100 / 48000)
+  hifi set mixer 44100     global mixer rate (44100 / 48000 / 192000 / 384000)
+  hifi set hifirate 192000 vendor HiFi port rate (auto = stock DAC maximum).
+                           Pick the rate YOUR library uses: that content then
+                           plays bit-perfect, the rest is resampled UP, never down
   hifi set max 384000      HiFi direct ceiling (48000 - 384000)
   hifi set bitdepth 24     USB / wired output bit-depth ceiling (16 / 24 / 32)
   hifi set restart 1       restart the audio stack after applying (1 / 0)
@@ -1482,6 +1525,8 @@ HiFi SRC Bypass  (universal)   v1.6
   hifi preset 192k         generic 192 kHz compatibility tier
   hifi preset 96k          96 kHz Hi-Res Premium tier
   hifi preset 44k          align the system mixer to a 44.1 kHz library
+  hifi preset 192mix       raise the global mixer to 192 kHz
+  hifi preset 384mix       raise the global mixer to 384 kHz (high-end only)
   hifi apply               TURN ON : patch + mount, persists across reboots
   hifi restore             TURN OFF: unmount, back to factory, module stays
   hifi reset               alias of restore
@@ -1507,8 +1552,8 @@ case "${1:-status}" in
   status)     ensure_dirs; load_conf; do_status ;;
   dac)        ensure_dirs; load_conf; cmd_dac ;;
   json)       ensure_dirs; load_conf; status_json ;;
-  rates)      printf 'ceiling options : %s\nmixer options   : 44100 48000\nbitdepth options: %s\n' \
-                     "$ALL_RATES" "$ALL_BITS" ;;
+  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\n' \
+                     "$ALL_RATES" "$ALL_MIXER" "$ALL_HIFI" "$ALL_BITS" ;;
   scan)       ensure_dirs; load_conf; prepare || true; do_ports ;;
   ports)      ensure_dirs; load_conf; do_ports ;;
   files)      ensure_dirs; load_conf; do_files ;;
@@ -1539,6 +1584,22 @@ case "${1:-status}" in
   doctor|probe)
               ensure_dirs; load_conf
               if [ -r "$MODDIR/bin/probe192.sh" ]; then
+                # the deep check is sections [1]..[7] only; [8] lives in its own
+                # pane (`hifi adapt` / the WebUI adaptation card).  Without this
+                # filter the probe also runs the adapt half, which is exactly
+                # the duplication the split was meant to remove.
+                HIFI_PROBE_SECTION=core; export HIFI_PROBE_SECTION
+                exec sh "$MODDIR/bin/probe192.sh"
+              else
+                echo "probe192.sh not found under $MODDIR/bin" >&2
+                exit 1
+              fi ;;
+  # [8] on its own -- the WebUI shows it in a separate pane, so the doctor
+  # pane ([1]..[7]) opens straight on the live output state, no scrolling.
+  adapt|adaptinfo|deviceinfo)
+              ensure_dirs; load_conf
+              if [ -r "$MODDIR/bin/probe192.sh" ]; then
+                HIFI_PROBE_SECTION=adapt; export HIFI_PROBE_SECTION
                 exec sh "$MODDIR/bin/probe192.sh"
               else
                 echo "probe192.sh not found under $MODDIR/bin" >&2

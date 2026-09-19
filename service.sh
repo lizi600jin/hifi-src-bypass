@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # late_start service : safety net + post-boot diagnostic snapshot.
-# module version: v1.6
+# module version: v1.8
 #
 # Some ROMs remount /vendor or /odm after post-fs-data, which silently drops a
 # bind mount.  Wait for boot_completed + audioserver, then ask the controller

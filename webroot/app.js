@@ -1,4 +1,4 @@
-/* HiFi SRC Bypass - WebUI front-end  (universal, v1.6)
+/* HiFi SRC Bypass - WebUI front-end  (universal, v1.8)
  *
  * Talks to bin/hifi through the KernelSU / APatch root bridge.
  * Every command is a plain shell line, so it also works from a terminal.
@@ -50,13 +50,42 @@
     [384000, '384 kHz']
   ];
 
+  /* global mixer work rate.  AudioPolicyManager picks the MAXIMUM of a mixed
+     output's rate list, so the module rewrites the mixer mixPort to hold this
+     rate ALONE -- that is why these are the only choices offered. */
+  var MIXERS = [
+    [44100, '44.1 kHz', '44.1k 曲库免 SRC（推荐）'],
+    [48000, '48 kHz', '原厂默认'],
+    [192000, '192 kHz', '高倍升采样'],
+    [384000, '384 kHz', '拉满 · 高端机型']
+  ];
+
+  /* The vendor HiFi port ("hifi_playback") is the one USB audio ACTUALLY plays
+     through on Qualcomm / OnePlus style ROMs -- deep_buffer just sits in standby.
+     It ships [dynamic], so the policy pins it to the DAC maximum and resamples
+     everything up.  Pinning it to the rate YOUR library uses makes that content
+     bit-perfect; everything else is resampled UP (lossless band-limited
+     interpolation), never DOWN (which would discard the ultrasonic band). */
+  var HIFIS = [
+    ['auto', 'auto', '原厂动态：跟随小尾巴最大率（全部上采样，无比特完美）'],
+    [44100, '44.1 kHz', '44.1k 曲库'],
+    [48000, '48 kHz', '48k 曲库'],
+    [96000, '96 kHz', '96k 母带'],
+    [176400, '176.4 kHz', '176.4k'],
+    [192000, '192 kHz', '超清母带 / 臻品音质（推荐）'],
+    [352800, '352.8 kHz', '352.8k'],
+    [384000, '384 kHz', '384k 母带 · 高端机型']
+  ];
+
   var PRESETS = {
     /* 自动识别：不预设任何参数，交给设备端读小尾巴上报的能力后自己决定 */
     'auto': { auto: true, label: '自动识别' },
     '384k': { mixer: 48000, max: 384000, bits: 32, label: '384 kHz 满血' },
     '192k': { mixer: 48000, max: 192000, bits: 24, label: '192 kHz 超清母带' },
     '96k':  { mixer: 48000, max: 96000,  bits: 24, label: '96 kHz 高清臻音' },
-    '44k':  { mixer: 44100, max: 384000, bits: 32, label: '44.1 kHz 全局对齐' }
+    '44k':  { mixer: 44100, max: 384000, bits: 32, label: '44.1 kHz 全局对齐' },
+    '192mix': { mixer: 192000, max: 384000, bits: 32, label: '192 kHz 全局混音' },
+    '384mix': { mixer: 384000, max: 384000, bits: 32, label: '384 kHz 全局混音' }
   };
 
   /* bit-depth ceiling.  16-bit is always kept as the baseline, so these are
@@ -68,7 +97,7 @@
   ];
 
   var state = {
-    mod: null, mixer: 48000, max: 384000, bits: 32,
+    mod: null, mixer: 48000, max: 384000, bits: 32, hifi: 'auto',
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -237,10 +266,12 @@
   }
 
   function currentPreset() {
+    if (Number(state.max) === 384000 && Number(state.mixer) === 384000) return '384mix';
+    if (Number(state.max) === 384000 && Number(state.mixer) === 192000) return '192mix';
+    if (Number(state.max) === 384000 && Number(state.mixer) === 44100) return '44k';
     if (Number(state.max) === 384000 && Number(state.mixer) === 48000) return '384k';
     if (Number(state.max) === 192000 && Number(state.mixer) === 48000) return '192k';
     if (Number(state.max) === 96000 && Number(state.mixer) === 48000) return '96k';
-    if (Number(state.max) === 384000 && Number(state.mixer) === 44100) return '44k';
     return null;
   }
 
@@ -256,9 +287,34 @@
       if (r[0] === 384000) b.title = 'CX31993 / 支持 384k 的小尾巴';
       host.appendChild(b);
     });
-    Array.prototype.forEach.call($('pillMixer').children, function (b) {
-      b.classList.toggle('sel', Number(b.dataset.v) === Number(state.mixer));
-    });
+    var mh = $('pillMixer');
+    if (mh) {
+      mh.innerHTML = '';
+      MIXERS.forEach(function (m) {
+        var el = document.createElement('button');
+        el.className = 'pill' + (Number(state.mixer) === m[0] ? ' sel' : '');
+        el.dataset.v = m[0];
+        el.textContent = m[1];
+        var em = document.createElement('em');
+        em.textContent = m[2];
+        el.appendChild(em);
+        mh.appendChild(el);
+      });
+    }
+    var ph = $('pillHifi');
+    if (ph) {
+      ph.innerHTML = '';
+      HIFIS.forEach(function (m) {
+        var el = document.createElement('button');
+        el.className = 'pill' + (String(state.hifi) === String(m[0]) ? ' sel' : '');
+        el.dataset.h = m[0];
+        el.textContent = m[1];
+        var em = document.createElement('em');
+        em.textContent = m[2];
+        el.appendChild(em);
+        ph.appendChild(el);
+      });
+    }
     var cur = currentPreset();
     Array.prototype.forEach.call($('pillPreset').children, function (b) {
       b.classList.toggle('sel', b.dataset.p === cur);
@@ -304,6 +360,7 @@
   function renderStatus(s) {
     state.mixer = Number(s.mixer_rate);
     state.max = Number(s.max_rate);
+    state.hifi = s.hifi_rate || 'auto';
     state.bits = Number(s.bit_depth) || 32;
     state.restart = !(s.restart === 0 || s.restart === false);
     state.applied = !!s.applied;
@@ -318,6 +375,9 @@
     $('stApplied').textContent = s.applied ? '已挂载' : '未挂载';
     $('stMixer').textContent = fmtHz(s.mixer_rate);
     $('stMax').textContent = fmtHz(s.max_rate);
+    var stHf = $('stHifi');
+    if (stHf) stHf.textContent = (s.hifi_rate || 'auto') === 'auto'
+      ? 'auto（跟随小尾巴最大率）' : fmtHz(s.hifi_rate) + '（锁定）';
     var stB = $('stBits');
     if (stB) stB.textContent = s.bit_depth ? (s.bit_depth + '-bit') : '—';
     $('stAudio').textContent = s.audioserver || '—';
@@ -399,7 +459,7 @@
   }
 
   function busy(on, label) {
-    ['btnApply', 'btnReset', 'btnDac', 'btnRefresh', 'btnDiag', 'btnDoctor'].forEach(function (id) {
+    ['btnApply', 'btnReset', 'btnDac', 'btnRefresh', 'btnDiag', 'btnDoctor', 'btnAdapt'].forEach(function (id) {
       var el = $(id);
       if (el) el.disabled = !!on;
     });
@@ -490,6 +550,7 @@
     busy(true, '应用中…');
     return hifi('set mixer ' + state.mixer)
       .then(function () { return hifi('set max ' + state.max); })
+      .then(function () { return hifi('set hifirate ' + state.hifi); })
       .then(function () { return hifi('set bitdepth ' + state.bits); })
       .then(function () { return hifi('set restart ' + (state.restart ? 1 : 0)); })
       .then(function () { return hifi('set enabled 1'); })
@@ -499,7 +560,7 @@
         if (r.errno !== 0) { banner('应用失败：' + ((r.stdout + r.stderr).trim() || 'unknown'), true); }
         else {
           toast('已应用 · 混音 ' + fmtHz(state.mixer) + ' / 上限 ' + fmtHz(state.max) +
-                ' / 位深 ' + state.bits + 'bit');
+                ' / HiFi 口 ' + state.hifi + ' / 位深 ' + state.bits + 'bit');
           banner('');
         }
         return refresh();
@@ -569,6 +630,28 @@
       });
   }
 
+  /* device adaptation info: the [8] half, kept in its own pane so the doctor
+     pane above always opens straight on the live output state ([7]) */
+  function runAdapt() {
+    var out = $('adaptBox');
+    busy(true, '采集适配信息…');
+    if (out) out.textContent = '正在采集机型适配信息（策略文件 / 补丁基线 / 真实输出路径）…\n' +
+      '换机型或刷入无效时，把这一整段发给维护者即可定位。';
+    return hifi('adapt')
+      .then(function (r) {
+        busy(false);
+        var txt = ((r.stdout || '') + (r.stderr || '')).trim();
+        if (out) out.textContent = txt || '（没有输出）';
+        toast('适配信息已采集');
+      })
+      ['catch'](function (e) {
+        busy(false);
+        if (out) out.textContent = '采集失败：' + explain(e);
+        banner('采集失败：' + explain(e), true);
+        renderDiag();
+      });
+  }
+
   /* one-tap restore: lossless, reversible, settings are kept */
   function restoreFactory() {
     var msg = '一键还原：立即卸载补丁、回到原厂音频策略，并重启音频服务。\n\n' +
@@ -597,6 +680,7 @@
     if (host.id === 'pillPreset') { applyPreset(el.dataset.p); return; }
     if (host.id === 'pillMax') state.max = Number(el.dataset.v);
     else if (host.id === 'pillMixer') state.mixer = Number(el.dataset.v);
+    else if (host.id === 'pillHifi') state.hifi = el.dataset.h;
     else if (host.id === 'pillBits') { state.bits = Number(el.dataset.b); renderBits(); return; }
     else return;
     renderPills();
@@ -633,6 +717,8 @@
 
   var btnDoctor = $('btnDoctor');
   if (btnDoctor) btnDoctor.addEventListener('click', runDoctor);
+  var btnAdapt = $('btnAdapt');
+  if (btnAdapt) btnAdapt.addEventListener('click', runAdapt);
 
   renderPills();
   renderBits();
