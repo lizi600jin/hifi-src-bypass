@@ -795,7 +795,9 @@ elif [ -n "$OUT_FMT" ]; then
   if [ -n "$ACT_RATE" ] && [ -n "$OUT_RATE" ] && [ "$ACT_RATE" -gt "$OUT_RATE" ] 2>/dev/null; then
     VERDICT_LINE="✅ 模块生效：App 的 ${ACT_RATE} Hz 高解析请求被接受，按 ${OUT_BITS:-?}/${OUT_RATE} Hz 输出；降档是 DAC 硬件上限（换更高上限的解码器可到 ${ACT_RATE}）"
   elif [ -n "$ACT_RATE" ] && [ -n "$OUT_RATE" ] && [ "$ACT_RATE" = "$OUT_RATE" ] 2>/dev/null; then
-    VERDICT_LINE="✅ 模块生效：App 请求与实际输出一致（${OUT_BITS:-?} @ ${OUT_RATE} Hz），无降档"
+    VERDICT_LINE="✅ 比特完美：App 请求率与实际输出一致（${OUT_BITS:-?} @ ${OUT_RATE} Hz），无降档也无上采样"
+  elif [ -n "$ACT_RATE" ] && [ -n "$OUT_RATE" ] && [ "$ACT_RATE" -lt "$OUT_RATE" ] 2>/dev/null; then
+    VERDICT_LINE="✅ 输出通道在跑：${OUT_CHAN:-USB} ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz。请求 ${ACT_RATE} Hz < 输出 ${OUT_RATE} Hz = 无损上采样（不丢内容，但不是比特完美）。② 的请求率是【当前这首曲子】的采样率 —— 换歌就会变（HiRes 档位下 48k/96k/192k 都存在）。想让这一档比特完美：hifi set mixer ${ACT_RATE} 后 apply"
   else
     VERDICT_LINE="✅ 输出通道在跑：${OUT_CHAN:-USB} ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz（明细见排查段）"
   fi
