@@ -791,6 +791,112 @@ else
   for m in $MIX_PORTS; do grep -q "\"$m\"" "$USBF_ACTIVE" 2>/dev/null && USB_MIXED=yes; done
   grep -q 'hifi' "$USBF_ACTIVE" 2>/dev/null && USB_HIFI=yes
 
+  # ----------------------------------------------------------------- 5b+
+  # ALSO scan every active output (regardless of USB) and bucket its device
+  # type so we can answer "is anything at all playing?" when no DAC is plugged
+  # in.  v1.9 [7] segment used to incorrectly warn "no audio in playback"
+  # while music apps were playing through the loudspeaker (no DAC connected).
+  # Two passes:
+  #   (a) dumpsys media.audio_policy (when it has the classic Outputs section)
+  #   (b) dumpsys audio -- AudioPlaybackConfiguration.state:started counts, plus
+  #       the AudioSystemAdapter device cache which lists every routable device
+  # Buckets we care about:
+  #   SPK_ACTIVE_N    -> SPEAKER (any flag combo, excluding SAFE)
+  #   EARPIECE_ACTIVE_N -> EARPIECE
+  #   WIRED_ACTIVE_N  -> WIRED_*
+  SPK_ACTIVE_N=0; EARPIECE_ACTIVE_N=0; WIRED_ACTIVE_N=0
+  PHONE_ACTIVE_N=0  # loudspeaker + earpiece combined (the user's phone output)
+  MEDIA_PLAYING_N=0  # count of started USAGE_MEDIA AudioPlaybackConfigurations
+  DUMP_B="/data/local/tmp/.hifi_probe_dump_audio.txt"
+  dumpsys audio 2>/dev/null > "$DUMP_B"
+  # (a) dumpsys media.audio_policy -- still useful on QTI/AIDL where it's not empty
+  awk -v d2="$D2" '
+    /^[[:space:]]*Outputs \([0-9]+\)/ { o=1; next }
+    o && /^[[:space:]]*Inputs \([0-9]+\)/ { o=0 }
+    o && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/ {
+      if (rec != "") {
+        if (rec ~ /Global active count: [1-9]/) print rec "\n==END=="
+      }
+      rec=$0; next
+    }
+    o && rec != "" { rec = rec "\n" $0 }
+    END { if (rec != "" && rec ~ /Global active count: [1-9]/) print rec "\n==END==" }
+  ' "$D2" 2>/dev/null | awk '
+    /^==END==$/ { if (rec != "") process(); rec=""; next }
+    { rec = rec (rec != "" ? "\n" : "") $0 }
+    END { if (rec != "") process() }
+    function process() {
+      ty = ""
+      if (match(rec, /type:[A-Za-z_]+/)) ty = substr(rec, RSTART+5, RLENGTH-5)
+      if (ty == "") return
+      if (ty ~ /SPEAKER/ && ty !~ /SAFE/) spk_n++
+      else if (ty ~ /EARPIECE/) epc_n++
+      else if (ty ~ /WIRED_/) wired_n++
+    }
+    END {
+      print "SPK=" spk_n + 0
+      print "EARPIECE=" epc_n + 0
+      print "WIRED=" wired_n + 0
+    }
+  ' > /data/local/tmp/.hifi_probe_audio_buckets.txt 2>/dev/null
+  # (b) dumpsys audio -- scan all places that hint at the routing target:
+  #     * AudioPlaybackConfiguration.state:started + usage=USAGE_MEDIA      -> app
+  #       is playing media right now (regardless of output device)
+  #     * AudioSystemAdapter.mDevicesForAttrCache entries with type:speaker /
+  #       earpiece -> these are the device caches the system will route USAGE_MEDIA
+  #       to when no DAC is connected; if they say "speaker" we know the
+  #       loudspeaker is the live target even if media.audio_policy is empty.
+  MEDIA_PLAYING_N="$(awk '
+    /AudioPlaybackConfiguration .*state:started/ {
+      block = $0
+      next_line = 1
+      while (next_line && getline nxt > 0) {
+        if (nxt ~ /state:paused/) { next_line = 0; break }
+        if (nxt ~ /usage=USAGE_MEDIA/) { media_n++; next_line = 0; break }
+      }
+    }
+    END { print media_n + 0 }
+  ' "$DUMP_B" 2>/dev/null)"
+  case "$MEDIA_PLAYING_N" in ''|*[!0-9]*) MEDIA_PLAYING_N=0 ;; esac
+  # also count any active speaker/earpiece/wired device routed by the system
+  AUDIO_ROUTE_ACTIVE="$(awk '
+    /AudioDeviceAttributes:/ {
+      # the next line(s) describe the routing: type:speaker / earpiece / wired_*
+      t = ""
+      if (getline ln > 0) {
+        if (match(ln, /type:[A-Za-z_]+/)) t = substr(ln, RSTART+5, RLENGTH-5)
+        else t = ""
+      }
+      if (t == "") next
+      if (t ~ /SPEAKER/ && t !~ /SAFE/) spk_n++
+      else if (t ~ /EARPIECE/) epc_n++
+      else if (t ~ /WIRED_/) wired_n++
+    }
+    END { print spk_n+0, epc_n+0, wired_n+0 }
+  ' "$DUMP_B" 2>/dev/null)"
+  AUDIO_SPK=$(echo "$AUDIO_ROUTE_ACTIVE" | awk '{print $1}')
+  AUDIO_EPC=$(echo "$AUDIO_ROUTE_ACTIVE" | awk '{print $2}')
+  AUDIO_WIRED=$(echo "$AUDIO_ROUTE_ACTIVE" | awk '{print $3}')
+  case "$AUDIO_SPK" in ''|*[!0-9]*) AUDIO_SPK=0 ;; esac
+  case "$AUDIO_EPC" in ''|*[!0-9]*) AUDIO_EPC=0 ;; esac
+  case "$AUDIO_WIRED" in ''|*[!0-9]*) AUDIO_WIRED=0 ;; esac
+  if [ -r /data/local/tmp/.hifi_probe_audio_buckets.txt ]; then
+    A_SPK="$(sed -n 's/^SPK=//p' /data/local/tmp/.hifi_probe_audio_buckets.txt | head -1)"
+    A_EPC="$(sed -n 's/^EARPIECE=//p' /data/local/tmp/.hifi_probe_audio_buckets.txt | head -1)"
+    A_WIRED="$(sed -n 's/^WIRED=//p' /data/local/tmp/.hifi_probe_audio_buckets.txt | head -1)"
+    case "$A_SPK" in ''|*[!0-9]*) A_SPK=0 ;; esac
+    case "$A_EPC" in ''|*[!0-9]*) A_EPC=0 ;; esac
+    case "$A_WIRED" in ''|*[!0-9]*) A_WIRED=0 ;; esac
+    SPK_ACTIVE_N=$(( ${A_SPK:-0} > ${AUDIO_SPK:-0} ? ${A_SPK:-0} : ${AUDIO_SPK:-0} ))
+    EARPIECE_ACTIVE_N=$(( ${A_EPC:-0} > ${AUDIO_EPC:-0} ? ${A_EPC:-0} : ${AUDIO_EPC:-0} ))
+    WIRED_ACTIVE_N=$(( ${A_WIRED:-0} > ${AUDIO_WIRED:-0} ? ${A_WIRED:-0} : ${AUDIO_WIRED:-0} ))
+  fi
+  PHONE_ACTIVE_N=$((SPK_ACTIVE_N + EARPIECE_ACTIVE_N))
+  printf '  本机扬声器活动输出 : %s 条（speaker %s / earpiece %s / wired %s / 媒体 started 流 %s）\n' \
+    "$PHONE_ACTIVE_N" "$SPK_ACTIVE_N" "$EARPIECE_ACTIVE_N" "$WIRED_ACTIVE_N" "$MEDIA_PLAYING_N"
+  rm -f /data/local/tmp/.hifi_probe_audio_buckets.txt 2>/dev/null
+  rm -f "$DUMP_B" 2>/dev/null
+
   printf '  路由到 USB 的输出（共 %s 条，其中活动的 %s 条；原文）：\n' "$USB_REC_N" "$USB_ACTIVE_N"
   grep -v '^==END==$' "$USBF" 2>/dev/null | sed 's/^/    /' | head -40
   if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
@@ -950,9 +1056,25 @@ elif [ -n "$OUT_FMT" ]; then
 elif [ "${NOTE_RUN:-no}" = yes ]; then
   OUTPUT_LINE="有 PCM 流在跑（明细见排查段第 5 条）"
   VERDICT_LINE="✅ 有音频流，规格见第 5 段明细"
+elif [ "${PHONE_ACTIVE_N:-0}" -gt 0 ] || [ "${MEDIA_PLAYING_N:-0}" -gt 0 ] 2>/dev/null; then
+  # No USB output, but the loudspeaker / earpiece / wired headset is carrying
+  # audio.  This is a NORMAL state when no DAC is connected -- do NOT warn.
+  # The module is "idling on the speaker side" and the user just doesn't have
+  # a dongle plugged in.  Before v1.9 the [7] segment reported a misleading
+  # "no audio in playback" warning in this case.
+  spk_brief=""
+  [ "${SPK_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 扬声器(${SPK_ACTIVE_N})"
+  [ "${EARPIECE_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 听筒(${EARPIECE_ACTIVE_N})"
+  [ "${WIRED_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 有线耳机(${WIRED_ACTIVE_N})"
+  if [ -z "$spk_brief" ]; then
+    # routed to a built-in device that the buckets don't track (BT? BT_A2DP?)
+    spk_brief="内置输出"
+  fi
+  OUTPUT_LINE="App 在 ${spk_brief} 上播放（未连接 USB DAC）"
+  VERDICT_LINE="ℹ️ 小尾巴未连接：模块在小尾巴侧处于空载，但手机 ${spk_brief} 播放正常（媒体 started 流 ${MEDIA_PLAYING_N} 条）。插上小尾巴后 USB 链路判定立刻生效 —— 详见 5b"
 else
-  OUTPUT_LINE="此刻没有音频送往小尾巴"
-  VERDICT_LINE="⚠️ 检测时没有音频在播 —— 放一首歌并保持播放，再点一次「开始校验」"
+  OUTPUT_LINE="此刻没有任何音频在播"
+  VERDICT_LINE="ℹ️ 系统无音频播放：手机扬声器、听筒、有线耳机、USB DAC 都空。插上小尾巴/播一首歌后再点「开始校验」"
 fi
 
 printf '%s\n' "==================== 速览 ===================="
@@ -1004,8 +1126,15 @@ elif [ "${USB_ACTIVE_N:-0}" -gt 0 ] 2>/dev/null; then
   fi
 elif [ "${NOTE_RUN:-no}" = yes ]; then
   printf 'USB 侧 : 第 5 段有流但 dumpsys 无活动 USB 输出 —— 以第 5 段为准\n'
+elif [ "${PHONE_ACTIVE_N:-0}" -gt 0 ] || [ "${MEDIA_PLAYING_N:-0}" -gt 0 ] 2>/dev/null; then
+  # No DAC connected, but the phone's own speaker / earpiece / wired is
+  # carrying audio.  v1.9's [7] segment now distinguishes this from "system
+  # silent": the module is correctly IDLE on the USB side and the user is
+  # listening through the phone -- no warning needed.
+  printf 'USB 侧 : 小尾巴未连接 —— 5b 段已扫到本机扬声器/听筒/有线耳机上有 %s 条活跃输出（speaker %s / earpiece %s / wired %s / 媒体 started 流 %s）\n' \
+    "$PHONE_ACTIVE_N" "$SPK_ACTIVE_N" "$EARPIECE_ACTIVE_N" "$WIRED_ACTIVE_N" "$MEDIA_PLAYING_N"
 else
-  printf 'USB 侧 : 此刻没有音频送往小尾巴（暂停 / 没路由 / 设备没枚举成功）\n'
+  printf 'USB 侧 : 系统无音频播放（扬声器、听筒、有线耳机、 USB DAC 都空）\n'
 fi
 if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
   printf '归属   : 播放器自带 USB 驱动独占（usbfs×%s）——「独占 USB 输出」开启形态，模块在链路外\n' "${USBFS_N}"
@@ -1019,12 +1148,15 @@ elif [ "${NOTE_MODE:-}" = app ]; then
   printf '归属   : 疑似 App 自带 USB 驱动 -> 本模块不参与\n'
 elif [ "${NOTE_RUN:-no}" = yes ]; then
   printf '归属   : 有 PCM 流在跑，明细见第 5 段\n'
+elif [ "${PHONE_ACTIVE_N:-0}" -gt 0 ] || [ "${MEDIA_PLAYING_N:-0}" -gt 0 ] 2>/dev/null; then
+  printf '归属   : 手机扬声器/听筒/有线耳机在播（媒体 started 流 %s 条） —— 模块在 USB 侧处于空载（无小尾巴可介入），属正常形态\n' "$MEDIA_PLAYING_N"
 else
-  printf '归属   : 当前没有音频送往小尾巴 —— 播放中重跑本校验\n'
+  printf '归属   : 系统无音频播放 —— 播一首歌或插上小尾巴后再跑本校验\n'
 fi
 printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
 printf '         不开独占时出现 ✅ 模块生效 / ✓ 直通 / ✓ HiFi 通道 = 模块在链路上正常干预；\n'
 printf '         出现 ℹ️ usbfs 接管 = 独占已开（App 直连 DAC，模块在链路外，属正常形态）；\n'
+printf '         没插 DAC 时出现 ℹ️ 小尾巴未连接 = 手机扬声器/听筒在播（属正常）；\n'
 printf '         异常时把「排查明细」整段发回来可继续定位。\n'
 hr
 fi   # want_core  ->  sections [1]..[7]
