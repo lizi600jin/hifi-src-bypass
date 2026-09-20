@@ -297,10 +297,14 @@ if [ -n "$POLICY" ] && [ "$APPLIED" = yes ] 2>/dev/null; then
     {
       if (!in_dp) {
         if ($0 ~ /<devicePort/) {
-          tn = ""; mt = $0
-          if (match(mt, /tagName="[^"]*"/)) tn = substr(mt, RSTART+9, RLENGTH-10)
-          else if (match(mt, /name="[^"]*"/)) tn = substr(mt, RSTART+6, RLENGTH-7)
-          if (tn ~ /[Ss]peaker|[Ee]arpiece/) {
+          tn = ""
+          # tagName is the AOSP / OP13 QTI name; name is a generic QTI AIDL
+          # fallback; type is the older AOSP HIDL fallback.  The first one
+          # that matches wins, in that order.
+          if (match($0, /tagName="[^"]*"/)) tn = substr($0, RSTART+9, RLENGTH-10)
+          else if (match($0, /name="[^"]*"/)) tn = substr($0, RSTART+6, RLENGTH-7)
+          else if (match($0, /type="AUDIO_DEVICE_OUT_[^"]*"/)) tn = substr($0, RSTART+21, RLENGTH-22)
+          if (tn ~ /^[Ss]peaker$|^[Ee]arpiece$/) {
             in_dp = 1; print "PORT|" tn
           }
           # non-SPK devicePort: do NOT enter the block.  We rely on the next
