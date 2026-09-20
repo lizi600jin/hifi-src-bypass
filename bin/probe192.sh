@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - deep verification (sampling rate + bit depth)
-#                                        probe192.sh           v1.8
+#                                        probe192.sh           v1.9.0
 #
 #   usage A (module installed):
 #     su -c "sh /data/adb/modules/hifi_src_bypass/bin/probe192.sh"
@@ -918,7 +918,7 @@ if [ -z "$mod_ver" ] && [ -n "$POLICY_FILES" ]; then
   mod_ver="$(grep -h -o "$MARKER v[0-9.]*" $POLICY_FILES 2>/dev/null | head -n1 | sed "s/^$MARKER //")"
 fi
 if [ "$APPLIED" = yes ]; then
-  MOUNT_LINE="✅ 已挂载 $MOUNTED_N 个策略文件（v${mod_ver:-?} · 混音 ${CONFIG_MIX:-?} / 直通上限 ${CONFIG_MAX:-?} / 位深 ${CONFIG_BITS:-?}bit / 扬声器 ${CONFIG_SPK:-auto} / 扬声器位深 ${CONFIG_SPKBITS:-16}bit）"
+  MOUNT_LINE="✅ 已挂载 $MOUNTED_N 个策略文件（${mod_ver:-?} · 混音 ${CONFIG_MIX:-?} / 直通上限 ${CONFIG_MAX:-?} / 位深 ${CONFIG_BITS:-?}bit / 扬声器 ${CONFIG_SPK:-auto} / 扬声器位深 ${CONFIG_SPKBITS:-16}bit）"
 elif [ -n "$POLICY_FILES" ]; then
   MOUNT_LINE="❌ 未挂载 —— 先点「应用并生效」或重启，其余判断不成立"
 else
