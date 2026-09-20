@@ -189,6 +189,12 @@ printf '内核 : %s\n' "$(uname -r 2>/dev/null)"
 CONFIG_MIX="$(sed -n 's/^MIXER_RATE=//p'  "$CONFIG" 2>/dev/null | head -n1)"
 CONFIG_MAX="$(sed -n 's/^MAX_RATE=//p'    "$CONFIG" 2>/dev/null | head -n1)"
 CONFIG_BITS="$(sed -n 's/^BIT_DEPTH=//p' "$CONFIG" 2>/dev/null | head -n1)"
+CONFIG_HIFI="$(sed -n 's/^HIFI_RATE=//p'  "$CONFIG" 2>/dev/null | head -n1)"
+CONFIG_SPK="$(sed -n 's/^SPK_RATE=//p'    "$CONFIG" 2>/dev/null | head -n1)"
+CONFIG_SPKBITS="$(sed -n 's/^SPK_BITS=//p' "$CONFIG" 2>/dev/null | head -n1)"
+# Defensive: missing keys fall back to the same defaults the controller ships
+[ -n "$CONFIG_SPK" ]     || CONFIG_SPK=auto
+[ -n "$CONFIG_SPKBITS" ] || CONFIG_SPKBITS=16
 case "${CONFIG_BITS:-32}" in
   16) WANT_N=1 ;;
   24) WANT_N=2 ;;
@@ -267,6 +273,142 @@ MIX_PORTS="$(names_of MIX)"
 SPK_PORTS="$(names_of SPK)"
 printf '\n  说明：USB 走通路上是 USB，WIRED 是 3.5mm/模拟，DIR 是 App 独占直通，\n'
 printf '        MIX 是混音路径（混音率对齐作用于此），SPK 是扬声器/听筒。\n'
+
+# -------------------------------------------------------------- SPK port scan
+# Did the speaker / earpiece device port get pinned to CONFIG_SPK and topped
+# out at CONFIG_SPKBITS?  We re-read the live XML (which is the bind-mounted
+# patch file) and pick out the samplingRates + format attributes of every
+# tag whose tagName / name carries "Speaker" or "Earpiece" -- the SPK class
+# from the patcher's view covers all of those, including the empty-profile
+# `Speaker Safe` variant that some ROMs ship; empty ports are silently dropped
+# (a port with zero profiles has no rate set and no formats, so the verdict
+# is meaningless for it).
+SPK_PORT_SCAN="no"
+SPK_VERDICT=""
+if [ -n "$POLICY" ] && [ "$APPLIED" = yes ] 2>/dev/null; then
+  SPK_PORT_SCAN="yes"
+  # pull every tagName-bearing devicePort whose name looks like SPK; preserve
+  # the order they appear in the file.  We scan in *devicePort block* units
+  # because the opening tag may sit on its own line and start after a few
+  # nested <profile> lines, and we want every profile's rate+bit attributed
+  # to the right port.
+  spk_lines="$(awk '
+    BEGIN { in_dp = 0 }
+    {
+      if (!in_dp) {
+        if ($0 ~ /<devicePort/) {
+          tn = ""; mt = $0
+          if (match(mt, /tagName="[^"]*"/)) tn = substr(mt, RSTART+9, RLENGTH-10)
+          else if (match(mt, /name="[^"]*"/)) tn = substr(mt, RSTART+6, RLENGTH-7)
+          if (tn ~ /[Ss]peaker|[Ee]arpiece/) {
+            in_dp = 1; print "PORT|" tn
+          }
+          # non-SPK devicePort: do NOT enter the block.  We rely on the next
+          # <devicePort or </devicePort pattern in another file to bound it,
+          # but since most ROMs only ever nest <profile> inside <devicePort>,
+          # the boundary is the *closing* </devicePort -- so we stay out of
+          # the block entirely.  This means a non-SPK devicePort can stretch
+          # over many lines and we will simply not process its body, which
+          # is exactly what we want.
+        }
+      } else {
+        # inside a Speaker/Earpiece block -- collect profile attributes
+        if (match($0, /samplingRates="[^"]*"/)) {
+          s = substr($0, RSTART+15, RLENGTH-16); gsub(/,|;/, " ", s)
+          print "RATE|" s
+        }
+        if ($0 ~ /format="AUDIO_FORMAT_PCM_16_BIT"/ || $0 ~ /pcmType="INT_16_BIT"/) print "BIT|16"
+        if ($0 ~ /format="AUDIO_FORMAT_PCM_24_BIT_PACKED"/ || $0 ~ /pcmType="INT_24_BIT"/ || $0 ~ /pcmType="FIXED_Q_8_24"/) print "BIT|24"
+        if ($0 ~ /format="AUDIO_FORMAT_PCM_32_BIT"/ || $0 ~ /pcmType="INT_32_BIT"/) print "BIT|32"
+        if ($0 ~ /<\/devicePort>/) { print "ENDPORT"; in_dp = 0; cur = "" }
+      }
+    }
+  ' "$POLICY" 2>/dev/null)"
+  # per-port accumulators derived directly from the raw scan.  We do not
+  # bother with a shell-side accumulator any more -- awk below gives us the
+  # final per-port verdict in a single pass.
+  SPK_INFO="$(printf '%s\n' "$spk_lines" | awk '
+    BEGIN { cur=""; nm=0; nr=0; }
+    /^PORT\|/ {
+      if (cur != "" && nm > 0) {
+        # collapse rates: only single-rate ports count
+        if (nr == 1) {
+          print cur "|" rates "|" has24 "|" has32
+        } else {
+          print cur "|MULTI|" has24 "|" has32
+        }
+      }
+      cur = substr($0, index($0, "|") + 1)
+      rates = ""; nm = 0; nr = 0; has24 = 0; has32 = 0
+    }
+    /^RATE\|/ {
+      r = substr($0, index($0, "|") + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", r)
+      rates = rates " " r
+      nf = split(r, _ff)
+      nm = nf
+      nr = nf
+    }
+    /^BIT\|/ {
+      b = substr($0, index($0, "|") + 1)
+      if (b == "24") has24 = 1
+      if (b == "32") has32 = 1
+    }
+    END {
+      if (cur != "" && nm > 0) {
+        if (nr == 1) {
+          print cur "|" rates "|" has24 "|" has32
+        } else {
+          print cur "|MULTI|" has24 "|" has32
+        }
+      }
+    }
+  ')"
+  # accumulate the verdict from SPK_INFO: pick the LARGEST single-rate port
+  # (a port whose module pinned is the speaker port we care about; ports
+  # left multi-rate get ignored as the module did not touch them)
+  SPK_INFO_VERDICT="$(printf '%s\n' "$SPK_INFO" | awk -F'|' '
+    $2 != "MULTI" && $2 != "" {
+      if ($2 + 0 > max) {
+        max = $2 + 0
+        h24 = ($3 == 1) ? "yes" : "no"
+        h32 = ($4 == 1) ? "yes" : "no"
+        thePort = $1
+      }
+    }
+    END {
+      if (thePort == "") print "0|no|no"
+      else printf "%d|%s|%s|%s\n", max, h24, h32, thePort
+    }
+  ')"
+  SPK_MAX_RATE="$(printf '%s\n' "$SPK_INFO_VERDICT" | cut -d'|' -f1)"
+  SPK_HAS24="$(printf '%s\n' "$SPK_INFO_VERDICT" | cut -d'|' -f2)"
+  SPK_HAS32="$(printf '%s\n' "$SPK_INFO_VERDICT" | cut -d'|' -f3)"
+  SPK_BIGGEST_PORT="$(printf '%s\n' "$SPK_INFO_VERDICT" | cut -d'|' -f4)"
+  case "$CONFIG_SPKBITS" in
+    16) want_24=no;  want_32=no  ;;
+    24) want_24=yes; want_32=no  ;;
+    32) want_24=yes; want_32=yes ;;
+    *)  want_24=no;  want_32=no  ;;
+  esac
+  SPK_RATE_OK="no"; SPK_BITS_OK="no"
+  if [ "$CONFIG_SPK" = auto ]; then
+    SPK_RATE_OK="yes"
+  else
+    # numeric SPK_RATE: every pinned port must equal CONFIG_SPK; we already
+    # filtered to single-rate ports above, so SPK_MAX_RATE is one rate only
+    [ -n "$SPK_MAX_RATE" ] && [ "$SPK_MAX_RATE" = "$CONFIG_SPK" ] && SPK_RATE_OK="yes"
+  fi
+  if [ "$want_24" = "$SPK_HAS24" ] && [ "$want_32" = "$SPK_HAS32" ]; then
+    SPK_BITS_OK="yes"
+  fi
+  case "$SPK_RATE_OK:$SPK_BITS_OK" in
+    yes:yes) SPK_VERDICT="✅ 扬声器档位生效（采样率=${CONFIG_SPK} 位深上限=${CONFIG_SPKBITS}bit，最高活动端口=${SPK_BIGGEST_PORT:-?} @ ${SPK_MAX_RATE}Hz）" ;;
+    yes:no)  SPK_VERDICT="⚠️ 扬声器采样率已钉到 ${CONFIG_SPK} Hz（最高活动端口 ${SPK_BIGGEST_PORT:-?}），但位深档未生效（实测 INT_24_BIT=${SPK_HAS24} INT_32_BIT=${SPK_HAS32}，期望 ${want_24}/${want_32}）" ;;
+    no:yes)  SPK_VERDICT="⚠️ 扬声器位深档（${CONFIG_SPKBITS}bit）已生效，但采样率未钉到 ${CONFIG_SPK} Hz（实测端口最高采样率=${SPK_MAX_RATE:-?} Hz，最高活动端口=${SPK_BIGGEST_PORT:-?}）" ;;
+    no:no)   SPK_VERDICT="❌ 扬声器档位未生效 —— 采样率钉到 ${CONFIG_SPK:-?} 失败（实测最高 ${SPK_MAX_RATE:-?} Hz），位深档也未对齐（实测 INT_24_BIT=${SPK_HAS24} INT_32_BIT=${SPK_HAS32}，期望 ${want_24}/${want_32}）" ;;
+  esac
+fi
 
 # =============================================== 2. per-port ceilings (layer A)
 sec 2 "生效文件里的上限（证据 A：配置层）"
@@ -776,7 +918,7 @@ if [ -z "$mod_ver" ] && [ -n "$POLICY_FILES" ]; then
   mod_ver="$(grep -h -o "$MARKER v[0-9.]*" $POLICY_FILES 2>/dev/null | head -n1 | sed "s/^$MARKER //")"
 fi
 if [ "$APPLIED" = yes ]; then
-  MOUNT_LINE="✅ 已挂载 $MOUNTED_N 个策略文件（v${mod_ver:-?} · 混音 ${CONFIG_MIX:-?} / 直通上限 ${CONFIG_MAX:-?} / 位深 ${CONFIG_BITS:-?}bit）"
+  MOUNT_LINE="✅ 已挂载 $MOUNTED_N 个策略文件（v${mod_ver:-?} · 混音 ${CONFIG_MIX:-?} / 直通上限 ${CONFIG_MAX:-?} / 位深 ${CONFIG_BITS:-?}bit / 扬声器 ${CONFIG_SPK:-auto} / 扬声器位深 ${CONFIG_SPKBITS:-16}bit）"
 elif [ -n "$POLICY_FILES" ]; then
   MOUNT_LINE="❌ 未挂载 —— 先点「应用并生效」或重启，其余判断不成立"
 else
@@ -814,6 +956,7 @@ printf '%s\n' "① 模块挂载   : $MOUNT_LINE"
 printf '%s\n' "② 音频客户端 : $CLIENT_LINE"
 printf '%s\n' "③ 实际输出   : $OUTPUT_LINE"
 printf '%s\n' "④ 判定       : $VERDICT_LINE"
+printf '%s\n' "⑤ 扬声器档位 : ${SPK_VERDICT:-未校验（扬声器端口不存在或模块未挂载）}"
 printf '%s\n' "=============================================="
 printf '%s\n' ""
 printf '%s\n' "---- 排查明细（遇到问题把下面整段附在 issue 里）----"
@@ -823,8 +966,19 @@ if [ "$APPLIED" = yes ]; then
 else
   printf '配置层 : 补丁【未】挂载 —— 先应用或重启，其余判断都不成立\n'
 fi
-printf '端口   : USB[%s] WIRED[%s] DIRECT[%s] MIX[%s]\n' \
-       "${USB_PORTS:-无}" "${WIRED_PORTS:-无}" "${DIR_PORTS:-无}" "${MIX_PORTS:-无}"
+printf '端口   : USB[%s] WIRED[%s] DIRECT[%s] MIX[%s] SPK[%s]\n' \
+       "${USB_PORTS:-无}" "${WIRED_PORTS:-无}" "${DIR_PORTS:-无}" "${MIX_PORTS:-无}" "${SPK_PORTS:-无}"
+
+# ⑤ 详细展开: 列出扬声器端口在补丁里的 profile, 让上面的 ⑤ 一行可对照
+if [ "$SPK_PORT_SCAN" = "yes" ] && [ -n "$SPK_INFO" ]; then
+  printf '扬声器端口（读取自挂载中的策略文件）:\n'
+  printf '%s\n' "$SPK_INFO" | awk -F'|' '
+    $2 == "MULTI" { printf "  · %s: (多率保留, 模块未触碰 — 通常是 ROM 自留接口)\n", $1; next }
+    $2 != "" { printf "  · %s: 钉死率=%s Hz  /  INT_24_BIT=%s  /  INT_32_BIT=%s\n", $1, $2, ($3==1?"yes":"no"), ($4==1?"yes":"no") }
+  '
+  printf '扬声器档位校验 : 期望采样率=%s 位深上限=%sbit\n' \
+    "${CONFIG_SPK:-auto}" "${CONFIG_SPKBITS:-16}"
+fi
 case "${D_VERDICT:-}" in
   D1) printf '链路层 : D1 —— 本机内核没导出 pcm 目录，/proc 观察通道不可用；以 5b/5c 为准\n' ;;
   D2) printf '链路层 : D2 —— ALSA 上没有流：检测时暂停了，或播放器自带驱动独占（4b/5c）\n' ;;
