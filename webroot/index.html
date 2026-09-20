@@ -123,6 +123,15 @@
       <div class="pills" id="pillSpkBits"></div>
     </div>
 
+    <div class="field">
+      <label>扬声器一键优化</label>
+      <p class="hint">应用「扬声器最佳实践」:44.1kHz + 24bit + 零重采样（对齐 44.1k 曲库）。HiRes 实验档请在终端跑 <code>hifi speaker hires</code>。</p>
+      <div class="pills">
+        <button class="pill" id="btnSpkFlat">一键优化 (44.1k / 24bit)<em>44.1k 曲库 · 推荐</em></button>
+        <button class="pill" id="btnSpkAuto">还原 auto (16bit)<em>回到原厂</em></button>
+      </div>
+    </div>
+
     <div class="field row">
       <div>
         <label>应用后自动重启音频服务</label>

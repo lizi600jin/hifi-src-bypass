@@ -515,7 +515,8 @@
   }
 
   function busy(on, label) {
-    ['btnApply', 'btnReset', 'btnDac', 'btnRefresh', 'btnDiag', 'btnDoctor', 'btnAdapt'].forEach(function (id) {
+    ['btnApply', 'btnReset', 'btnDac', 'btnRefresh', 'btnDiag', 'btnDoctor', 'btnAdapt',
+     'btnSpkFlat', 'btnSpkAuto'].forEach(function (id) {
       var el = $(id);
       if (el) el.disabled = !!on;
     });
@@ -715,6 +716,28 @@
       });
   }
 
+  /* speaker one-tap best practice: `hifi speaker flat|auto` (tier handled
+     entirely on the device side, WebUI only fires the subcommand) */
+  function runSpeaker(tier) {
+    busy(true, '优化中…');
+    return hifi('speaker ' + tier)
+      .then(function (r) {
+        busy(false);
+        var txt = ((r.stdout || '') + (r.stderr || '')).trim();
+        if (r.errno !== 0) {
+          banner('扬声器' + (tier === 'auto' ? '还原' : '优化') + '失败：' + (txt || 'unknown'), true);
+        } else {
+          toast(tier === 'auto' ? '扬声器已还原原厂' : '扬声器已优化 (44.1k / 24bit)');
+        }
+        return refresh();
+      })
+      ['catch'](function (e) {
+        busy(false);
+        banner('扬声器' + (tier === 'auto' ? '还原' : '优化') + '失败：' + explain(e), true);
+        renderDiag();
+      });
+  }
+
   /* one-tap restore: lossless, reversible, settings are kept */
   function restoreFactory() {
     var msg = '一键还原：立即卸载补丁、回到原厂音频策略，并重启音频服务。\n\n' +
@@ -784,6 +807,10 @@
   if (btnDoctor) btnDoctor.addEventListener('click', runDoctor);
   var btnAdapt = $('btnAdapt');
   if (btnAdapt) btnAdapt.addEventListener('click', runAdapt);
+  var btnSpkFlat = $('btnSpkFlat');
+  if (btnSpkFlat) btnSpkFlat.addEventListener('click', function () { runSpeaker('flat'); });
+  var btnSpkAuto = $('btnSpkAuto');
+  if (btnSpkAuto) btnSpkAuto.addEventListener('click', function () { runSpeaker('auto'); });
 
   renderPills();
   renderBits();

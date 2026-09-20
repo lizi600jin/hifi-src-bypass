@@ -1407,6 +1407,52 @@ do_preset() {
   do_apply
 }
 
+# ================================================================== speaker
+# 一键扬声器最佳实践。DSP 算法（杜比 / Dirac / DTS）受商业 license + 系统
+# 签名锁死，模块做不了；这里做的是链路纯净：把扬声器/听筒端口钉到与曲库
+# 一致的采样率 + 补齐位深，消除扬声器路径上的重采样。MIXER_RATE 一律不动，
+# 它属于 do_preset / `hifi set mixer` 的职责范围。
+do_speaker() {
+  case "${1:-}" in
+    flat)
+      SPK_RATE=44100; SPK_BITS=24; ENABLED=1
+      save_conf
+      echo "扬声器最佳实践 flat 档：SPK_RATE=44100 SPK_BITS=24（MIXER_RATE 保持 $MIXER_RATE 不动）"
+      echo "  如果你的曲库以 48k 为主，请改用: hifi set spk 48000 && hifi apply"
+      ;;
+    hires)
+      SPK_RATE=192000; SPK_BITS=32; ENABLED=1
+      save_conf
+      echo "扬声器实验 hires 档：SPK_RATE=192000 SPK_BITS=32（MIXER_RATE 保持 $MIXER_RATE 不动）"
+      echo "  高端设备 / HiRes 扬声器实验用；如果扬声器无声请立即: hifi speaker auto"
+      ;;
+    auto)
+      SPK_RATE=auto; SPK_BITS=16; ENABLED=1
+      save_conf
+      echo "扬声器还原 auto 档：SPK_RATE=auto SPK_BITS=16（回到原厂行为）"
+      ;;
+    status)
+      printf 'speaker rate : %s\n' "$SPK_RATE"
+      printf 'speaker bits : %s\n' "$SPK_BITS"
+      if [ -r "$MODDIR/bin/probe192.sh" ]; then
+        HIFI_PROBE_SECTION=adapt; export HIFI_PROBE_SECTION
+        sh "$MODDIR/bin/probe192.sh" 2>/dev/null | sed -n '/^\[9\]/,$p'
+      else
+        echo "probe192.sh not found under $MODDIR/bin -- vendor DSP 状态不可用"
+      fi
+      return 0 ;;
+    *)
+      echo "speaker must be one of: flat | hires | auto | status"
+      echo "  flat   : SPK_RATE=44100 SPK_BITS=24 -- 44.1k 曲库免 SRC（推荐）"
+      echo "  hires  : SPK_RATE=192000 SPK_BITS=32 -- 高端设备 / HiRes 扬声器实验"
+      echo "  auto   : SPK_RATE=auto SPK_BITS=16 -- 回到原厂行为"
+      echo "  status : 当前扬声器档位 + 本机厂商 DSP 检测结果"
+      return 1 ;;
+  esac
+  echo "applying..."
+  do_apply
+}
+
 do_verify() {
   printf 'config        : mixer=%s ceiling=%s bits=%s enabled=%s\n' \
          "$MIXER_RATE" "$MAX_RATE" "$BIT_DEPTH" "$ENABLED"
@@ -1573,6 +1619,12 @@ HiFi SRC Bypass  (universal)   v1.9.0
   hifi preset 44k          align the system mixer to a 44.1 kHz library
   hifi preset 192mix       raise the global mixer to 192 kHz
   hifi preset 384mix       raise the global mixer to 384 kHz (high-end only)
+  hifi speaker flat        speaker best practice: SPK_RATE=44100 SPK_BITS=24
+                           (44.1k library; for a 48k library use: hifi set spk 48000)
+  hifi speaker hires       experimental HiRes speaker tier: SPK_RATE=192000 SPK_BITS=32
+                           (if the speaker goes silent, run: hifi speaker auto)
+  hifi speaker auto        back to the factory speaker behaviour (16-bit, auto rate)
+  hifi speaker status      current speaker knobs + the vendor DSP check of probe [9]
   hifi apply               TURN ON : patch + mount, persists across reboots
   hifi restore             TURN OFF: unmount, back to factory, module stays
   hifi reset               alias of restore
@@ -1605,6 +1657,7 @@ case "${1:-status}" in
   files)      ensure_dirs; load_conf; do_files ;;
   set)        ensure_dirs; load_conf; do_set "${2:-}" "${3:-}" ;;
   preset)     ensure_dirs; load_conf; do_preset "${2:-}" ;;
+  speaker)    ensure_dirs; load_conf; do_speaker "${2:-}" ;;
   apply)      ensure_dirs; load_conf; do_apply ;;
   restore)    ensure_dirs; load_conf; do_restore ;;
   reset)      ensure_dirs; load_conf; do_restore ;;

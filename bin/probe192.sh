@@ -13,7 +13,7 @@
 #
 #   section filter (used by the WebUI to show the two halves in separate panes):
 #     HIFI_PROBE_SECTION=core   -> sections [1]..[7]   (is it really running?)
-#     HIFI_PROBE_SECTION=adapt  -> section  [8]        (device adaptation info)
+#     HIFI_PROBE_SECTION=adapt  -> sections [8] + [9]  (device adaptation info)
 #     (unset)                   -> everything, as before
 #
 #   It reports, not guesses:
@@ -1276,5 +1276,91 @@ printf '  想一次性导出成文件的话：在管理器终端执行\n'
 printf '     sh /data/adb/modules/%s/bin/hifi report\n' "$MOD_ID"
 printf '  它会写到 /data/local/tmp/hifi_src_bypass_report.txt，无需 root 即可 adb pull 取回。\n'
 hr
-fi   # want_adapt  ->  section [8]
+
+# ==============================================================================
+# 9. 厂商 DSP 状态
+#
+# 回答"能不能做出类杜比音效"这件事的前半段：本机链路里到底有没有厂商 DSP
+# 在动声音。DSP 算法（杜比 / Dirac / DTS）受商业 license + 系统签名锁死，
+# 模块做不了也不做 —— 但可以检测它是否存在并提示在哪里手动关掉：
+# 链路越干净，本模块"零重采样 + 位深补齐"的收益就越直接。
+# 只做检测 + 提示，不碰任何厂商组件。
+# ==============================================================================
+sec 9 "厂商 DSP 状态（类杜比问题的前半段：先让链路纯净）"
+
+VDSP_N=0
+VDSP_NAMES=""
+VDSP_RAW=""
+
+# --- ① 系统特性声明（pm list features）---
+_fts="$(pm list features 2>/dev/null | grep -iE 'dolby|dirac|dts|audiofx|soundeffect' | tr -d '\r')"
+if [ -n "$_fts" ]; then
+  printf '\n--- ① 系统特性声明（pm list features）---\n'
+  printf '%s\n' "$_fts" | sed 's/^/  /'
+  VDSP_N=$((VDSP_N + 1)); VDSP_NAMES="$VDSP_NAMES features"
+  VDSP_RAW="$VDSP_RAW
+$_fts"
+fi
+
+# --- ② 装了的 DSP 相关包（pm list packages）---
+_pkgs="$(pm list packages 2>/dev/null | grep -iE 'dolby|dirac|dts|audiofx|miui\.audio|oplus|audioeffect|soundeffect' | tr -d '\r')"
+if [ -n "$_pkgs" ]; then
+  printf '\n--- ② DSP 相关包（pm list packages，%s 个）---\n' "$(printf '%s\n' "$_pkgs" | grep -c .)"
+  printf '%s\n' "$_pkgs" | sed 's/^/  /'
+  VDSP_N=$((VDSP_N + 1)); VDSP_NAMES="$VDSP_NAMES packages"
+  VDSP_RAW="$VDSP_RAW
+$_pkgs"
+fi
+
+# --- ③ Spatializer（系统级空间音效）---
+_spat="$(dumpsys media.audio_policy 2>/dev/null | grep -iE 'spatializer|dolby|dirac' | tr -d '\r' | head -n 8)"
+if [ -n "$_spat" ]; then
+  printf '\n--- ③ Spatializer / 空间音效（dumpsys media.audio_policy）---\n'
+  printf '%s\n' "$_spat" | sed 's/^/  /'
+  VDSP_N=$((VDSP_N + 1)); VDSP_NAMES="$VDSP_NAMES spatializer"
+  VDSP_RAW="$VDSP_RAW
+$_spat"
+fi
+
+# --- ④ 策略 XML 里声明的 effect 库 ---
+for f in /vendor/etc/audio_policy_configuration.xml \
+         /odm/etc/audio/*.xml /vendor/etc/audio/*.xml; do
+  [ -r "$f" ] || continue
+  h="$(stripc "$f" | grep -iE '<effectLibraries>|<effects[ >]' | head -n 4)"
+  [ -n "$h" ] || continue
+  printf '\n--- ④ 策略 XML 声明的效果库 ---\n'
+  printf '  %s:\n' "$f"
+  printf '%s\n' "$h" | sed 's/^/    /'
+  VDSP_N=$((VDSP_N + 1)); VDSP_NAMES="$VDSP_NAMES xml-effects"
+  VDSP_RAW="$VDSP_RAW
+$h"
+done
+
+# 归并命中的厂商名（跨层去重），得到 "N 个厂商 DSP（Dolby、Dirac）" 这种结论
+VDSP_HITS="$(printf '%s\n' "$VDSP_RAW" | grep -ioE 'dolby|dirac|dts|audiofx|mi ?sound|magic ?sound|oplus ?audio|soundeffect' | tr 'A-Z' 'a-z' | sort -u | tr '\n' ' ')"
+VDSP_HITS="$(printf '%s' "$VDSP_HITS" | sed 's/ *$//')"
+[ -z "$VDSP_HITS" ] && VDSP_HITS="$(printf '%s' "$VDSP_NAMES" | sed 's/^ //')"
+VDSP_C=0
+for _t in $VDSP_HITS; do VDSP_C=$((VDSP_C + 1)); done
+VDSP_LIST="$(printf '%s' "$VDSP_HITS" | sed 's/mi sound/Mi Sound/g; s/magic sound/Magic Sound/g; s/oplus audio/Oplus Audio/g; s/\baudiofx\b/AudioFX/g; s/\bdts\b/DTS/g; s/\bdolby\b/Dolby/g; s/\bdirac\b/Dirac/g; s/\bsoundeffect\b/SoundEffect/g; s/ /、/g')"
+
+# --- ⑤ 结论 + 关闭引导 ---
+printf '\n--- ⑤ 结论 ---\n'
+if [ "$VDSP_N" -gt 0 ]; then
+  printf '  检测到 %s 个厂商 DSP（%s）—— 信号来自：%s。\n' "$VDSP_C" "$VDSP_LIST" \
+    "$(printf '%s' "$VDSP_NAMES" | sed 's/^ //; s/ /、/g')"
+  printf '  这些 DSP 会在扬声器链路上再加工（空间音频 / 响度补偿 / EQ），\n'
+  printf '  与本模块的「零重采样 + 位深补齐」叠加后听感未必更好。\n'
+  printf '  建议手动关闭（模块不代劳，这是系统设置里的事）：\n'
+  printf '    设置 → 声音与振动 → 音效 / 杜比全景声 / Dirac → 关闭\n'
+  printf '    或（仅 Spatializer）：adb shell settings put global spatializer_mode 0\n'
+else
+  printf '  未检测到厂商 DSP（纯净）—— 链路里没有额外的加工层。\n'
+fi
+printf '\n  说明：以上仅检测，本模块不会替你关闭任何厂商组件；\n'
+printf '  就算全部关掉，「类杜比」的算法本身（虚拟环绕 / 响度模型）也是\n'
+printf '  商业 license + 系统签名锁死的，开源模块做不了，本模块做的是\n'
+printf '  链路纯净：零重采样 + 位深补齐，让原始内容原样到达扬声器。\n'
+hr
+fi   # want_adapt  ->  sections [8] + [9]
 exit 0
