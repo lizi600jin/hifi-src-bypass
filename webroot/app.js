@@ -1,4 +1,4 @@
-/* HiFi SRC Bypass - WebUI front-end  (universal, v1.9.0)
+/* HiFi SRC Bypass - WebUI front-end  (universal, v1.9.1)
  *
  * Talks to bin/hifi through the KernelSU / APatch root bridge.
  * Every command is a plain shell line, so it also works from a terminal.

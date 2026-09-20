@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - universal USB / wired SRC bypass
-#                                on-device controller            v1.9.0
+#                                on-device controller            v1.9.1
 #
 #   what it does
 #     The factory audio policy of THIS phone is located automatically -- no
@@ -1587,7 +1587,7 @@ migrate_old() {
 
 usage() {
   cat <<EOF
-HiFi SRC Bypass  (universal)   v1.9.0
+HiFi SRC Bypass  (universal)   v1.9.1
 
   hifi status              show current state + the files in use + DAC
   hifi scan                rescan the ROM for audio policy files AND USB HAL libs

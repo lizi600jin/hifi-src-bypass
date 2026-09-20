@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - deep verification (sampling rate + bit depth)
-#                                        probe192.sh           v1.9.0
+#                                        probe192.sh           v1.9.1
 #
 #   usage A (module installed):
 #     su -c "sh /data/adb/modules/hifi_src_bypass/bin/probe192.sh"
