@@ -78,6 +78,15 @@ BEGIN {
   # comment) -- the only lever that reaches the port USB audio actually plays
   # through on Qualcomm/OnePlus style ROMs.
   if (HIFI == "") HIFI = "auto"
+  # SPK defaults to "auto": speaker / earpiece device ports just get the mixer
+  # rate appended (the historical behaviour).  A numeric value pins them to
+  # that single rate instead, so speaker playback is not resampled when the
+  # source matches.  Mixer mixPorts are NOT affected -- they belong to MIXER.
+  if (SPK == "") SPK = "auto"
+  # SPKBITS defaults to 16: keep the factory bit depths on mixer-class ports.
+  # 24 / 32 lifts the historical "no bit-depth fill on mixer class" exclusion
+  # for the speaker / earpiece *device* ports (mixer mixPorts stay untouched).
+  if (SPKBITS == "") SPKBITS = 16
 }
 
 { N++; L[N] = $0 }
@@ -424,8 +433,17 @@ function emit_block(bn, cls, kind, name,
       nw = ""
       if (cls == "direct" || cls == "usb" || cls == "wired") {
         nw = make_rates(rates, (cls == "direct" ? DIRECT_POOL : DEV_POOL), CEIL)
-      } else if (cls == "mixer" && ispcm && (MIXER + 0) != (FMIX + 0)) {
-        nw = (kind == "mix") ? mixer_only(rates, MIXER) : add_rate(rates, MIXER)
+      } else if (cls == "mixer" && ispcm) {
+        if (kind == "mix") {
+          # mixer mixPorts belong to the MIXER knob only -- SPK never touches them
+          if ((MIXER + 0) != (FMIX + 0)) nw = mixer_only(rates, MIXER)
+        } else if (SPK ~ /^[0-9]+$/) {
+          # SPK pins the speaker / earpiece device port to one single rate:
+          # a sink never picks by max, so the pinned rate is what plays.
+          if (rates != SPK) nw = mixer_only(rates, SPK)
+        } else if ((MIXER + 0) != (FMIX + 0)) {
+          nw = add_rate(rates, MIXER)
+        }
       }
       if (nw != "" && nw != rates) {
         T[rline] = setattr(T[rline], "samplingRates", nw)
@@ -440,10 +458,16 @@ function emit_block(bn, cls, kind, name,
   #         channel masks, indentation and line breaks are the phone's, not
   #         something we invented.
   cn = 0
-  if (fpcm > 0 && cls != "mixer") {
+  # Mixer-class device ports (speaker / earpiece) join the fill only when the
+  # caller raised SPKBITS above 16, and they use SPKBITS as their ceiling;
+  # every other class keeps the global BITS ceiling.  Mixer *mixPorts* never
+  # take part -- their depth belongs to the system mixer, not to us.
+  if (fpcm > 0 && (cls != "mixer" || kind == "dev")) {
+    bitcap = ((cls == "mixer") ? SPKBITS : BITS) + 0
+    if (bitcap < 16 || bitcap > 32) bitcap = 16
     bs = ESTART[fpcm]; be = EEND[fpcm]
     for (b = 24; b <= 32; b += 8) {
-      if ((BITS + 0) < b) continue
+      if (bitcap < b) continue
       if (b == 24 && pb24 == 1) continue
       if (b == 32 && pb32 == 1) continue
       v = fmt_name(b)
@@ -553,7 +577,7 @@ END {
     i++
   }
 
-  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " | generated, do not hand edit -->"
+  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " spk=" SPK " spkbits=" SPKBITS " | generated, do not hand edit -->"
   hdr2 = "<!-- " MARKER " | ports=" PORTS " | repo: android audio src bypass -->"
 
   start = 1

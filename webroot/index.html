@@ -30,6 +30,8 @@
       <div class="stat"><span class="k">HiFi 直通上限</span><span class="v" id="stMax">—</span></div>
       <div class="stat"><span class="k">HiFi 通道率</span><span class="v" id="stHifi">—</span></div>
       <div class="stat"><span class="k">直通位深上限</span><span class="v" id="stBits">—</span></div>
+      <div class="stat"><span class="k">扬声器采样率</span><span class="v" id="stSpk">—</span></div>
+      <div class="stat"><span class="k">扬声器位深</span><span class="v" id="stSpkBits">—</span></div>
       <div class="stat"><span class="k">音频服务</span><span class="v" id="stAudio">—</span></div>
       <div class="stat"><span class="k">机型 / SDK</span><span class="v" id="stDevice">—</span></div>
       <div class="stat"><span class="k">生效文件</span><span class="v" id="stFiles">—</span></div>
@@ -103,6 +105,22 @@
       · <strong>32-bit</strong> = 16 + 24 + 32bit，最宽松，默认。<br>
       设为高于解码器能力的位深可能导致无声。</p>
       <div class="pills" id="pillBits"></div>
+    </div>
+
+    <div class="field">
+      <label>扬声器采样率档位</label>
+      <p class="hint">手机<strong>扬声器 / 听筒</strong>输出端口的采样率。原厂通常锁在 48 kHz：播放 44.1 kHz 音乐时会被系统重采样到 48 kHz。钉死为曲库采样率可让扬声器回放也免于 SRC。<br>
+      · <strong>auto</strong> = 原厂行为（推荐，最稳妥）。<br>
+      · 选定档位后，扬声器端口只保留该采样率 —— 其余率的音源会被上采样（不丢内容），<strong>永远不要往下选</strong>。</p>
+      <div class="pills" id="pillSpk"></div>
+    </div>
+
+    <div class="field">
+      <label>扬声器位深上限</label>
+      <p class="hint">扬声器 / 听筒端口允许的<strong>位深上限</strong>。手机内置 DAC 多为 24bit 能力，但原厂策略常只声明 16bit。<br>
+      · <strong>16-bit</strong> = 保持原厂（默认，最保守）。<br>
+      · <strong>24 / 32-bit</strong> = 补齐到该档位。设为高于硬件能力的位深可能导致扬声器无声。</p>
+      <div class="pills" id="pillSpkBits"></div>
     </div>
 
     <div class="field row">
@@ -195,7 +213,7 @@
     </ul>
   </section>
 
-  <footer class="foot">立子 · 全机型通用版 · v1.8.2</footer>
+  <footer class="foot">立子 · 全机型通用版 · v1.9.0</footer>
 </div>
 
 <script src="app.js"></script>

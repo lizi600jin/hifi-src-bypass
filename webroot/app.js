@@ -1,4 +1,4 @@
-/* HiFi SRC Bypass - WebUI front-end  (universal, v1.8.2)
+/* HiFi SRC Bypass - WebUI front-end  (universal, v1.9.0)
  *
  * Talks to bin/hifi through the KernelSU / APatch root bridge.
  * Every command is a plain shell line, so it also works from a terminal.
@@ -96,8 +96,25 @@
     [32, '32-bit', '16 + 24 + 32bit，最宽松（默认）']
   ];
 
+  /* 扬声器/听筒端口采样率档位。auto = 原厂不动；数字 = 钉死为该值。
+     独立于全局混音率：混音器归 MIXERS 管，扬声器归这里管。 */
+  var SPK_RATES = [
+    ['auto', 'auto', '原厂行为（推荐）'],
+    [44100, '44.1 kHz', '44.1k 曲库免 SRC'],
+    [48000, '48 kHz', '48k 曲库免 SRC'],
+    [96000, '96 kHz', '96k 母带'],
+    [192000, '192 kHz', '192k 母带'],
+    [384000, '384 kHz', '拉满 · 高端机型']
+  ];
+  var SPK_BITS = [
+    [16, '16-bit', '保持原厂（默认）'],
+    [24, '24-bit', '16 + 24bit'],
+    [32, '32-bit', '16 + 24 + 32bit']
+  ];
+
   var state = {
     mod: null, mixer: 48000, max: 384000, bits: 32, hifi: 'auto',
+    spk: 'auto', spkBits: 16,
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -336,6 +353,36 @@
     });
   }
 
+  function renderSpk() {
+    var host = $('pillSpk');
+    if (!host) return;
+    host.innerHTML = '';
+    SPK_RATES.forEach(function (r) {
+      var el = document.createElement('button');
+      el.className = 'pill' + (String(state.spk) === String(r[0]) ? ' sel' : '');
+      el.dataset.v = r[0];
+      el.textContent = r[1];
+      var em = document.createElement('em');
+      em.textContent = r[2];
+      el.appendChild(em);
+      host.appendChild(el);
+    });
+  }
+
+  function renderSpkBits() {
+    var host = $('pillSpkBits');
+    if (!host) return;
+    host.innerHTML = '';
+    SPK_BITS.forEach(function (b) {
+      var el = document.createElement('button');
+      el.className = 'pill' + (Number(state.spkBits) === b[0] ? ' sel' : '');
+      el.dataset.b = b[0];
+      el.textContent = b[1];
+      el.title = b[2];
+      host.appendChild(el);
+    });
+  }
+
   /* self test: everything we need to diagnose a failure remotely */
   function renderDiag() {
     var el = $('diagBox');
@@ -362,6 +409,8 @@
     state.max = Number(s.max_rate);
     state.hifi = s.hifi_rate || 'auto';
     state.bits = Number(s.bit_depth) || 32;
+    state.spk = s.spk_rate || 'auto';
+    state.spkBits = Number(s.spk_bits) || 16;
     state.restart = !(s.restart === 0 || s.restart === false);
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
@@ -380,6 +429,11 @@
       ? 'auto（跟随小尾巴最大率）' : fmtHz(s.hifi_rate) + '（锁定）';
     var stB = $('stBits');
     if (stB) stB.textContent = s.bit_depth ? (s.bit_depth + '-bit') : '—';
+    var stS = $('stSpk');
+    if (stS) stS.textContent = (s.spk_rate || 'auto') === 'auto'
+      ? 'auto（原厂）' : fmtHz(s.spk_rate) + '（锁定）';
+    var stSB = $('stSpkBits');
+    if (stSB) stSB.textContent = state.spkBits + '-bit';
     $('stAudio').textContent = s.audioserver || '—';
     $('stDevice').textContent = (s.device || '—') + ' / SDK ' + (s.sdk || '—');
     var stF = $('stFiles');
@@ -419,6 +473,8 @@
 
     renderPills();
     renderBits();
+    renderSpk();
+    renderSpkBits();
     renderDac(s);
     renderDiag();
   }
@@ -466,6 +522,10 @@
     Array.prototype.forEach.call($('pillPreset').children, function (b) { b.disabled = !!on; });
     var pb = $('pillBits');
     if (pb) Array.prototype.forEach.call(pb.children, function (b) { b.disabled = !!on; });
+    var ps = $('pillSpk');
+    if (ps) Array.prototype.forEach.call(ps.children, function (b) { b.disabled = !!on; });
+    var psb = $('pillSpkBits');
+    if (psb) Array.prototype.forEach.call(psb.children, function (b) { b.disabled = !!on; });
     if (on && label) $('btnApply').textContent = label;
     if (!on) $('btnApply').textContent = '应用并生效';
   }
@@ -552,6 +612,8 @@
       .then(function () { return hifi('set max ' + state.max); })
       .then(function () { return hifi('set hifirate ' + state.hifi); })
       .then(function () { return hifi('set bitdepth ' + state.bits); })
+      .then(function () { return hifi('set spk ' + state.spk); })
+      .then(function () { return hifi('set spkbits ' + state.spkBits); })
       .then(function () { return hifi('set restart ' + (state.restart ? 1 : 0)); })
       .then(function () { return hifi('set enabled 1'); })
       .then(function () { return hifi('apply'); })
@@ -560,7 +622,8 @@
         if (r.errno !== 0) { banner('应用失败：' + ((r.stdout + r.stderr).trim() || 'unknown'), true); }
         else {
           toast('已应用 · 混音 ' + fmtHz(state.mixer) + ' / 上限 ' + fmtHz(state.max) +
-                ' / HiFi 口 ' + state.hifi + ' / 位深 ' + state.bits + 'bit');
+                ' / HiFi 口 ' + state.hifi + ' / 位深 ' + state.bits + 'bit' +
+                ' / 扬声器 ' + (state.spk === 'auto' ? 'auto' : fmtHz(state.spk)) + ' / ' + state.spkBits + 'bit');
           banner('');
         }
         return refresh();
@@ -682,6 +745,8 @@
     else if (host.id === 'pillMixer') state.mixer = Number(el.dataset.v);
     else if (host.id === 'pillHifi') state.hifi = el.dataset.h;
     else if (host.id === 'pillBits') { state.bits = Number(el.dataset.b); renderBits(); return; }
+    else if (host.id === 'pillSpk') { state.spk = el.dataset.v === 'auto' ? 'auto' : Number(el.dataset.v); renderSpk(); return; }
+    else if (host.id === 'pillSpkBits') { state.spkBits = Number(el.dataset.b); renderSpkBits(); return; }
     else return;
     renderPills();
   });
@@ -722,6 +787,8 @@
 
   renderPills();
   renderBits();
+  renderSpk();
+  renderSpkBits();
   renderDiag();
   refresh();
 })();
