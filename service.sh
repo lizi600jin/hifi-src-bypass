@@ -23,7 +23,7 @@
 # ==============================================================================
 MODDIR="${0%/*}"
 HIFI="$MODDIR/bin/hifi"
-STATE=/data/adb/hifi_src_bypass
+STATE="${HIFI_STATE:-/data/adb/hifi_src_bypass}"
 LOG="$STATE/last.log"
 
 (
@@ -31,7 +31,7 @@ LOG="$STATE/last.log"
   snap() {
     [ -r "$HIFI" ] || exit 0
     HIFI_REPORT_WHY="late-start${1:+: $1}" \
-      /system/bin/sh "$HIFI" report >> "$LOG" 2>&1
+      sh "$HIFI" report >> "$LOG" 2>&1
     exit 0
   }
 
@@ -48,6 +48,49 @@ LOG="$STATE/last.log"
     i=$((i + 1))
   done
 
+  # ---- boot safety net v1.9.2 (P0-2 + P0-4) --------------------------------
+  # The K80 boot-stall reports showed two failure shapes that must never end
+  # in a stuck boot animation:
+  #   P0-4  audioserver never came up (or died right away) with the patch
+  #         mounted -> the patch config is being rejected.  Unmount it right
+  #         now: the user keeps a working phone and merely loses the patch.
+  #   P0-2  the same thing happened on 2 consecutive boots -> additionally
+  #         clear the enabled flag so the next boot does not re-mount at all.
+  # Both are one-shot scripts here -- no daemon, no background loop.
+  _as_up=0
+  if [ "$(getprop init.svc.audioserver)" = "running" ]; then
+    # running right after the wait loop; give it a moment and confirm it STAYS
+    sleep 10
+    if [ "$(getprop init.svc.audioserver)" = "running" ] \
+       && [ -n "$(pidof audioserver 2>/dev/null)" ]; then
+      _as_up=1
+    fi
+  fi
+
+  if [ "$_as_up" != 1 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: audioserver not healthy, unmounting patch (P0-4)" >> "$LOG"
+    # P0-5: restore must never touch the audio stack (it may be crash-looping).
+    # RESTART is persisted config, so zero it for this run without saving.
+    HIFI_RESTART=0 sh "$HIFI" set restart 0 >> "$LOG" 2>&1
+    HIFI_RESTART=0 sh "$HIFI" restore >> "$LOG" 2>&1
+    _bf="$STATE/bootfail.count"
+    _n=0
+    [ -r "$_bf" ] && _n="$(cat "$_bf" 2>/dev/null)"
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    _n=$((_n + 1))
+    printf '%s\n' "$_n" > "$_bf" 2>/dev/null
+    if [ "$_n" -ge 2 ]; then
+      echo "$(date '+%Y-%m-%d %H:%M:%S') BOOTFAIL-CIRCUIT-BREAK: $_n consecutive unhealthy boots, disabling auto-apply" >> "$LOG"
+      sh "$HIFI" set enabled 0 >> "$LOG" 2>&1
+      rm -f "$STATE/boot_degraded" 2>/dev/null
+    fi
+    snap "audioserver unhealthy (P0-4 unmount, bootfail=$_n)"
+  fi
+
+  # audioserver healthy: clear any boot-failure history and the degraded mark
+  rm -f "$STATE/bootfail.count" 2>/dev/null
+  rm -f "$STATE/boot_degraded" 2>/dev/null
+
   [ -r "$STATE/config.conf" ] || exit 0
   grep -q '^ENABLED=1$' "$STATE/config.conf" || snap "disabled"
   [ -r "$HIFI" ] || exit 0
@@ -56,13 +99,13 @@ LOG="$STATE/last.log"
   # try once more from scratch instead of staying silently inert
   if [ ! -s "$STATE/targets.lst" ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: no target list, re-running apply" >> "$LOG"
-    /system/bin/sh "$HIFI" set restart 0 >> "$LOG" 2>&1
-    /system/bin/sh "$HIFI" apply >> "$LOG" 2>&1
-    /system/bin/sh "$HIFI" set restart 1 >> "$LOG" 2>&1
+    sh "$HIFI" set restart 0 >> "$LOG" 2>&1
+    sh "$HIFI" apply >> "$LOG" 2>&1
+    sh "$HIFI" set restart 1 >> "$LOG" 2>&1
     snap "no target list"
   fi
 
-  missing="$(/system/bin/sh "$HIFI" missing 2>/dev/null)"
+  missing="$(sh "$HIFI" missing 2>/dev/null)"
   case "$missing" in ''|*[!0-9]*) missing=-1 ;; esac
 
   if [ "$missing" = 0 ]; then
@@ -76,8 +119,8 @@ LOG="$STATE/last.log"
 
   echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: $missing target(s) lost the patch, re-applying" >> "$LOG"
   # a remount means the mount was dropped for real, so no audio restart is needed
-  /system/bin/sh "$HIFI" set restart 0 >> "$LOG" 2>&1
-  /system/bin/sh "$HIFI" apply >> "$LOG" 2>&1
-  /system/bin/sh "$HIFI" set restart 1 >> "$LOG" 2>&1
+  sh "$HIFI" set restart 0 >> "$LOG" 2>&1
+  sh "$HIFI" apply >> "$LOG" 2>&1
+  sh "$HIFI" set restart 1 >> "$LOG" 2>&1
   snap "$missing target(s) re-applied"
 ) &

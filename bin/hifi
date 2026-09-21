@@ -1229,6 +1229,35 @@ do_files() {
 do_boot() {
   load_conf
   [ "$ENABLED" = 1 ] || { log "module disabled, factory policy left untouched"; return 0; }
+  # ---- boot safety net v1.9.2 (P0-3 first boot + degraded mark) ------------
+  # STATE comes from the standard global (L58, honors HIFI_STATE_DIR).
+  # A degraded mark means a previous boot pass timed out or audioserver
+  # rejected the patch: do not spend post-fs-data time mounting again -- the
+  # late_start pass in service.sh owns the decision from here on.
+  if [ -e "$STATE/boot_degraded" ]; then
+    log "boot degraded mark present: skipping boot mount, late_start will decide"
+    return 0
+  fi
+  # First boot after (re)installation: only prepare everything, do not mount.
+  # This bounds the post-fs-data cost on an unknown ROM to the pure
+  # discover+patch+verify pass, which the K80 stall showed can be slow; the
+  # mount itself happens on the NEXT boot once the preparation is proven.
+  # `hifi apply` (manual) is intentionally NOT affected by this gate.
+  # NOTE: the marker check above runs BEFORE enter_global_ns, which execs and
+  # re-enters the script -- a check placed after it would run twice.
+  if [ ! -e "$STATE/firstboot_done" ]; then
+    mkdir -p "$STATE" 2>/dev/null
+    : > "$STATE/firstboot_done" 2>/dev/null
+    log "first boot: preparing patches without mounting (P0-3); mount deferred to next boot"
+    # Prepare without mounting and without touching the audio stack: reuse the
+    # battle-tested boot pass, then undo whatever it mounted.  undo_mount only
+    # umounts + copies back from the archive; no audioserver interaction.
+    enter_global_ns boot
+    apply_mount || true
+    undo_mount || true
+    log "first boot preparation done; reboot to activate"
+    return 0
+  fi
   enter_global_ns boot
   apply_mount || true
   return 0
@@ -1412,6 +1441,26 @@ do_preset() {
 # 签名锁死，模块做不了；这里做的是链路纯净：把扬声器/听筒端口钉到与曲库
 # 一致的采样率 + 补齐位深，消除扬声器路径上的重采样。MIXER_RATE 一律不动，
 # 它属于 do_preset / `hifi set mixer` 的职责范围。
+# ---- boot safety net v1.9.2: read-only view of the boot state ---------------
+do_bootmode() {
+  # STATE is already the global one (set at L58 via HIFI_STATE_DIR); the
+  # HIFI_STATE override in do_boot exists because post-fs-data runs before the
+  # state dir exists.  Here we only read.
+  if [ -e "$STATE/boot_degraded" ]; then
+    printf 'bootmode: degraded\n'
+    printf '  一次开机的 boot 阶段超时或 audioserver 拒绝了补丁，本次挂载已自动跳过。\n'
+    printf '  late_start（service.sh）会在确认 audioserver 健康后自动恢复。\n'
+  elif [ ! -e "$STATE/firstboot_done" ]; then
+    printf 'bootmode: discover-only (first boot pending)\n'
+    printf '  安装/升级后的第一次开机只准备补丁不挂载（P0-3），重启后生效。\n'
+  else
+    printf 'bootmode: normal\n'
+    printf '  boot 安全网已就绪：post-fs-data 8s 超时自保 + audioserver 不健康自动卸载。\n'
+  fi
+  [ -r "$STATE/bootfail.count" ] && printf 'bootfail.count: %s（连续不健康开机次数，达 2 自动关闭自启）\n' "$(cat "$STATE/bootfail.count" 2>/dev/null)"
+  return 0
+}
+
 do_speaker() {
   case "${1:-}" in
     flat)
@@ -1625,6 +1674,7 @@ HiFi SRC Bypass  (universal)   v1.9.1
                            (if the speaker goes silent, run: hifi speaker auto)
   hifi speaker auto        back to the factory speaker behaviour (16-bit, auto rate)
   hifi speaker status      current speaker knobs + the vendor DSP check of probe [9]
+  hifi bootmode            show the boot safety-net state (normal/discover-only/degraded)
   hifi apply               TURN ON : patch + mount, persists across reboots
   hifi restore             TURN OFF: unmount, back to factory, module stays
   hifi reset               alias of restore
@@ -1658,6 +1708,7 @@ case "${1:-status}" in
   set)        ensure_dirs; load_conf; do_set "${2:-}" "${3:-}" ;;
   preset)     ensure_dirs; load_conf; do_preset "${2:-}" ;;
   speaker)    ensure_dirs; load_conf; do_speaker "${2:-}" ;;
+  bootmode)   ensure_dirs; do_bootmode ;;
   apply)      ensure_dirs; load_conf; do_apply ;;
   restore)    ensure_dirs; load_conf; do_restore ;;
   reset)      ensure_dirs; load_conf; do_restore ;;
