@@ -32,6 +32,7 @@
       <div class="stat"><span class="k">直通位深上限</span><span class="v" id="stBits">—</span></div>
       <div class="stat"><span class="k">扬声器采样率</span><span class="v" id="stSpk">—</span></div>
       <div class="stat"><span class="k">扬声器位深</span><span class="v" id="stSpkBits">—</span></div>
+      <div class="stat"><span class="k">DSP 位宽强制</span><span class="v" id="stSpkDsp">—</span></div>
       <div class="stat"><span class="k">音频服务</span><span class="v" id="stAudio">—</span></div>
       <div class="stat"><span class="k">机型 / SDK</span><span class="v" id="stDevice">—</span></div>
       <div class="stat"><span class="k">生效文件</span><span class="v" id="stFiles">—</span></div>
@@ -121,6 +122,15 @@
       · <strong>16-bit</strong> = 保持原厂（默认，最保守）。<br>
       · <strong>24 / 32-bit</strong> = 补齐到该档位。设为高于硬件能力的位深可能导致扬声器无声。</p>
       <div class="pills" id="pillSpkBits"></div>
+    </div>
+
+    <div class="field">
+      <label>DSP 位宽强制</label>
+      <p class="hint">高通 QTI 音频 HAL 原生支持系统属性 <code>persist.vendor.audio_hal.dsp_bit_width_enforce_mode</code>：设为 <strong>24 / 32</strong> 时，audioserver 启动即通过 "ASM Bit Width" 混音控制器把 ADSP 的 ASM 流强制到该位宽。<br>
+      · <strong>16（关）</strong> = 不注入任何属性（原厂行为，ADSP 按内容位深处理）。<br>
+      · <strong>24 / 32-bit</strong> = 点「应用并生效」时注入，重启音频服务后生效；<strong>一键还原</strong>会自动清除。<br>
+      纯属性层操作，不改写任何原厂文件。</p>
+      <div class="pills" id="pillSpkDsp"></div>
     </div>
 
     <div class="field">
