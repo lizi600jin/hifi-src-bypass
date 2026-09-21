@@ -1277,6 +1277,117 @@ printf '     sh /data/adb/modules/%s/bin/hifi report\n' "$MOD_ID"
 printf '  它会写到 /data/local/tmp/hifi_src_bypass_report.txt，无需 root 即可 adb pull 取回。\n'
 hr
 
+# --- 8·A SmartPA 检测（扬声器档位的物理天花板） -----------------------------
+#
+# WSA881x 类 SmartPA 的内核驱动把 DAI 硬锁在 48000 / S16 / mono
+# （上游 wsa881x.c：rates = SNDRV_PCM_RATE_48000, rate_max = 48000），
+# 这类机型上 SPK 采样率档位超过 48k 物理无效 —— 调了也只是白耗电。
+# WSA883x 及更新型号数字接口支持到 384k，但 ADSP 侧扬声器保护/EQ 的
+# 处理率通常仍 ≤48k，更高档位没有可闻收益。
+# 探测手段按优先级排列，全部失败时明确说"未识别"，绝不空段、绝不报错。
+printf '\n--- SmartPA 检测（扬声器档位的物理天花板）---\n'
+_SP_MODEL=""
+_SP_EVID=""
+
+# 信号 1：内核日志（需 root；dmesg 受限则降级 /proc/kmsg，再不行就跳过。
+# kmsg 是阻塞读，必须套 timeout，否则非 root/静默内核下 probe 会挂死）
+_dm="$(dmesg 2>/dev/null | grep -ioE 'wsa88[0-9x]+|cs35l[0-9]+|tfa9[0-9]+|smartpa' | sort -u | tr '\n' ' ')"
+if [ -z "$_dm" ] && [ ! -r /proc/kmsg ]; then
+  :   # dmesg 没给出线索，且 kmsg 也不可读 —— 静默走下一个信号
+elif [ -z "$_dm" ] && command -v timeout >/dev/null 2>&1; then
+  _dm="$(timeout 2 dd if=/proc/kmsg bs=4096 count=8 2>/dev/null | grep -ioE 'wsa88[0-9x]+|cs35l[0-9]+|tfa9[0-9]+|smartpa' | sort -u | tr '\n' ' ')"
+fi
+case "$(printf '%s' "$_dm" | tr 'A-Z' 'a-z')" in
+  *wsa881*) _SP_MODEL=WSA881x; _SP_EVID="kernel log: $_dm" ;;
+  *wsa883*) _SP_MODEL=WSA883x; _SP_EVID="kernel log: $_dm" ;;
+  *wsa884*) _SP_MODEL=WSA884x; _SP_EVID="kernel log: $_dm" ;;
+  *cs35l4*) _SP_MODEL=CS35L4x; _SP_EVID="kernel log: $_dm" ;;
+  *tfa9*)   _SP_MODEL=TFA98xx; _SP_EVID="kernel log: $_dm" ;;
+esac
+
+# 信号 2：platform 设备节点（wsa* 出现在 /sys/bus/platform/devices）
+if [ -z "$_SP_MODEL" ]; then
+  for _d in /sys/bus/platform/devices/*wsa* /sys/bus/soundwire/devices/*wsa*; do
+    [ -e "$_d" ] || continue
+    case "$(basename "$_d")" in
+      *wsa881*) _SP_MODEL=WSA881x ;;
+      *wsa883*) _SP_MODEL=WSA883x ;;
+      *wsa884*) _SP_MODEL=WSA884x ;;
+      *wsa*)    [ -z "$_SP_MODEL" ] && _SP_MODEL=WSA ;;
+    esac
+    [ -n "$_SP_MODEL" ] && _SP_EVID="sysfs: $(basename "$_d")"
+    break
+  done
+fi
+
+# 信号 3：厂商库指纹（libwpa*.so = WSA 家族伴随库；spkr_prot 也指向 SmartPA 链）
+if [ -z "$_SP_MODEL" ]; then
+  for _l in "$PROOT"/vendor/lib64/libwpa*.so "$PROOT"/odm/lib64/libwpa*.so \
+            "$PROOT"/vendor/lib64/libspkr_prot.so "$PROOT"/odm/lib64/libspkr_prot.so; do
+    [ -e "$_l" ] || continue
+    case "$(basename "$_l")" in
+      *881*) _SP_MODEL=WSA881x ;;
+      *883*) _SP_MODEL=WSA883x ;;
+      *)     [ -z "$_SP_MODEL" ] && _SP_MODEL=WSA ;;
+    esac
+    [ -n "$_SP_MODEL" ] && _SP_EVID="vendor lib: $(basename "$_l")"
+    break
+  done
+fi
+
+case "$_SP_MODEL" in
+  WSA881x) printf 'SmartPA: WSA881x（WSA881x 内核驱动 DAI 硬锁 48kHz/S16——SPK 采样率档位超过 48k 在此机型物理无效）\n' ;;
+  WSA883x|WSA884x) printf 'SmartPA: %s（数字层支持高率，但 ADSP 扬声器处理率通常 ≤48k，>48k 档位无可闻收益，功耗增加）\n' "$_SP_MODEL" ;;
+  CS35L4x|TFA98xx) printf 'SmartPA: %s（第三方 SmartPA：片上 DSP 自带保护/EQ，>48k 档位收益以实测为准）\n' "$_SP_MODEL" ;;
+  WSA)     printf 'SmartPA: WSA 系列（具体型号未定，SPK 档位效果以实测为准；证据：%s）\n' "$_SP_EVID" ;;
+  *)       printf 'SmartPA: 未识别（型号未知，SPK 档位效果以实测为准）\n' ;;
+esac
+[ -n "$_SP_EVID" ] && printf '  证据: %s\n' "$_SP_EVID"
+[ -z "$_SP_EVID" ] && printf '  （无内核日志/sysfs/厂商库线索；dmesg 需要 root，非 root 下信息更少）\n'
+unset _SP_MODEL _SP_EVID _dm _d _l
+
+# --- 8·B USB offload 检测（本模块 USB 解锁会不会被 ADSP 旁路） ---------------
+#
+# 高通 USB offload（ADSP 直驱 USB，内核 qc_audio_offload / snd-usb-audio-qcom）
+# 路径上采样率由 ADSP 决策，libalsautils 的 52 字节表与策略 XML 都不在链路上
+# —— 模块的 USB 解锁会静默失效。这里把这件事在出问题之前就告诉用户。
+printf '\n--- USB offload 检测（USB 解锁是否会被 ADSP 旁路）---\n'
+_UO_N=0
+_UO_WHY=""
+_gp="$(getprop 2>/dev/null | grep -iE 'usboffload|usb_offload' | tr -d '\r')"
+[ -n "$_gp" ] && { _UO_N=$((_UO_N + 1)); _UO_WHY="$_UO_WHY
+  getprop: $_gp"; }
+for _p in ro.vendor.audio.usboffload.psd.enabled \
+          ro.vendor.audio.usboffload.enabled \
+          ro.vendor.audio.usb.offload.region \
+          vendor.audio.usb.offload \
+          persist.vendor.audio.usb.offload; do
+  _v="$(getprop "$_p" 2>/dev/null | tr -d '\r')"
+  [ -n "$_v" ] || continue
+  _UO_N=$((_UO_N + 1)); _UO_WHY="$_UO_WHY
+  getprop $_p = $_v"
+done
+_lm="$(cat /proc/modules 2>/dev/null | grep -iE 'qc_audio_offload|usb_audio_qmi|snd_usb_audio_qmi|usb_f_audio' | tr -d '\r')"
+if [ -z "$_lm" ] && [ -d "$PROOT/vendor/lib/modules" ]; then
+  _lm="$(ls "$PROOT"/vendor/lib/modules "$PROOT"/odm/lib/modules 2>/dev/null | grep -iE 'qc_audio_offload|usb_audio_qmi|snd_usb_audio_qmi' | head -n 4)"
+fi
+[ -n "$_lm" ] && { _UO_N=$((_UO_N + 1)); _UO_WHY="$_UO_WHY
+  内核模块: $(printf '%s' "$_lm" | head -n 3)"; }
+if [ -r "$CARD_ROOT/cards" ]; then
+  _oc="$(grep -iE 'offload|fe\.' "$CARD_ROOT/cards" 2>/dev/null | tr -d '\r' | head -n 4)"
+  [ -n "$_oc" ] && { _UO_N=$((_UO_N + 1)); _UO_WHY="$_UO_WHY
+  声卡表: $_oc"; }
+fi
+
+if [ "$_UO_N" -gt 0 ]; then
+  printf '⚠ 检测到高通 USB offload 路径：本模块的 USB HAL 表解锁可能不参与采样率决策\n'
+  printf '  （ADSP 直驱 USB）。若 USB DAC 仍卡 96k，这是原因，不是模块失效。\n'
+else
+  printf '未检测到 USB offload：本模块 USB 解锁路径正常。\n'
+fi
+[ -n "$_UO_WHY" ] && printf '  证据:%s\n' "$_UO_WHY"
+unset _UO_N _UO_WHY _gp _p _v _lm _oc
+
 # ==============================================================================
 # 9. 厂商 DSP 状态
 #
