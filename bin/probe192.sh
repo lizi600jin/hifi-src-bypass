@@ -192,6 +192,9 @@ CONFIG_BITS="$(sed -n 's/^BIT_DEPTH=//p' "$CONFIG" 2>/dev/null | head -n1)"
 CONFIG_HIFI="$(sed -n 's/^HIFI_RATE=//p'  "$CONFIG" 2>/dev/null | head -n1)"
 CONFIG_SPK="$(sed -n 's/^SPK_RATE=//p'    "$CONFIG" 2>/dev/null | head -n1)"
 CONFIG_SPKBITS="$(sed -n 's/^SPK_BITS=//p' "$CONFIG" 2>/dev/null | head -n1)"
+CONFIG_DSPBITS="$(getprop persist.vendor.audio_hal.dsp_bit_width_enforce_mode 2>/dev/null)"
+CONFIG_SPKDSP="$(sed -n 's/^SPK_DSP_BITS=//p' "$CONFIG" 2>/dev/null | head -n1)"
+[ -n "$CONFIG_SPKDSP" ] || CONFIG_SPKDSP=16
 # Defensive: missing keys fall back to the same defaults the controller ships
 [ -n "$CONFIG_SPK" ]     || CONFIG_SPK=auto
 [ -n "$CONFIG_SPKBITS" ] || CONFIG_SPKBITS=16
@@ -1083,6 +1086,7 @@ printf '%s\n' "② 音频客户端 : $CLIENT_LINE"
 printf '%s\n' "③ 实际输出   : $OUTPUT_LINE"
 printf '%s\n' "④ 判定       : $VERDICT_LINE"
 printf '%s\n' "⑤ 扬声器档位 : ${SPK_VERDICT:-未校验（扬声器端口不存在或模块未挂载）}"
+printf '%s\n' "⑥ DSP 位宽强制 : ${CONFIG_DSPBITS:-未设置}（期望 ${CONFIG_SPKDSP:-16}）"
 printf '%s\n' "=============================================="
 printf '%s\n' ""
 printf '%s\n' "---- 排查明细（遇到问题把下面整段附在 issue 里）----"

@@ -106,6 +106,11 @@
     [192000, '192 kHz', '192k 母带'],
     [384000, '384 kHz', '拉满 · 高端机型']
   ];
+  var SPK_DSP = [
+    [16, '16（关）', '不注入 enforce 属性（原厂 ADSP 位宽）'],
+    [24, '24-bit', '强制 ADSP 24bit（apply 注入 / restore 清除）'],
+    [32, '32-bit', '强制 ADSP 32bit（apply 注入 / restore 清除）']
+  ];
   var SPK_BITS = [
     [16, '16-bit', '保持原厂（默认）'],
     [24, '24-bit', '16 + 24bit'],
@@ -114,7 +119,7 @@
 
   var state = {
     mod: null, mixer: 48000, max: 384000, bits: 32, hifi: 'auto',
-    spk: 'auto', spkBits: 16,
+    spk: 'auto', spkBits: 16, spkDsp: 16,
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -369,6 +374,20 @@
     });
   }
 
+  function renderSpkDsp() {
+    var host = $('pillSpkDsp');
+    if (!host) return;
+    host.innerHTML = '';
+    SPK_DSP.forEach(function (b) {
+      var el = document.createElement('button');
+      el.className = 'pill' + (Number(state.spkDsp) === b[0] ? ' sel' : '');
+      el.dataset.d = b[0];
+      el.textContent = b[1];
+      el.title = b[2];
+      host.appendChild(el);
+    });
+  }
+
   function renderSpkBits() {
     var host = $('pillSpkBits');
     if (!host) return;
@@ -411,6 +430,7 @@
     state.bits = Number(s.bit_depth) || 32;
     state.spk = s.spk_rate || 'auto';
     state.spkBits = Number(s.spk_bits) || 16;
+    state.spkDsp = Number(s.spk_dsp_bits) || 16;
     state.restart = !(s.restart === 0 || s.restart === false);
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
@@ -434,6 +454,9 @@
       ? 'auto（原厂）' : fmtHz(s.spk_rate) + '（锁定）';
     var stSB = $('stSpkBits');
     if (stSB) stSB.textContent = state.spkBits + '-bit';
+    var stDsp = $('stSpkDsp');
+    if (stDsp) stDsp.textContent = Number(state.spkDsp) === 16
+      ? '16（关）' : state.spkDsp + '-bit（强制）';
     $('stAudio').textContent = s.audioserver || '—';
     $('stDevice').textContent = (s.device || '—') + ' / SDK ' + (s.sdk || '—');
     var stF = $('stFiles');
@@ -475,6 +498,7 @@
     renderBits();
     renderSpk();
     renderSpkBits();
+    renderSpkDsp();
     renderDac(s);
     renderDiag();
   }
@@ -527,6 +551,8 @@
     if (ps) Array.prototype.forEach.call(ps.children, function (b) { b.disabled = !!on; });
     var psb = $('pillSpkBits');
     if (psb) Array.prototype.forEach.call(psb.children, function (b) { b.disabled = !!on; });
+    var psd = $('pillSpkDsp');
+    if (psd) Array.prototype.forEach.call(psd.children, function (b) { b.disabled = !!on; });
     if (on && label) $('btnApply').textContent = label;
     if (!on) $('btnApply').textContent = '应用并生效';
   }
@@ -615,6 +641,7 @@
       .then(function () { return hifi('set bitdepth ' + state.bits); })
       .then(function () { return hifi('set spk ' + state.spk); })
       .then(function () { return hifi('set spkbits ' + state.spkBits); })
+      .then(function () { return hifi('set spkdsp ' + state.spkDsp); })
       .then(function () { return hifi('set restart ' + (state.restart ? 1 : 0)); })
       .then(function () { return hifi('set enabled 1'); })
       .then(function () { return hifi('apply'); })
@@ -624,7 +651,8 @@
         else {
           toast('已应用 · 混音 ' + fmtHz(state.mixer) + ' / 上限 ' + fmtHz(state.max) +
                 ' / HiFi 口 ' + state.hifi + ' / 位深 ' + state.bits + 'bit' +
-                ' / 扬声器 ' + (state.spk === 'auto' ? 'auto' : fmtHz(state.spk)) + ' / ' + state.spkBits + 'bit');
+                ' / 扬声器 ' + (state.spk === 'auto' ? 'auto' : fmtHz(state.spk)) + ' / ' + state.spkBits + 'bit' +
+                ' / DSP ' + (Number(state.spkDsp) === 16 ? '关' : state.spkDsp + 'bit'));
           banner('');
         }
         return refresh();
@@ -770,6 +798,7 @@
     else if (host.id === 'pillBits') { state.bits = Number(el.dataset.b); renderBits(); return; }
     else if (host.id === 'pillSpk') { state.spk = el.dataset.v === 'auto' ? 'auto' : Number(el.dataset.v); renderSpk(); return; }
     else if (host.id === 'pillSpkBits') { state.spkBits = Number(el.dataset.b); renderSpkBits(); return; }
+    else if (host.id === 'pillSpkDsp') { state.spkDsp = Number(el.dataset.d); renderSpkDsp(); return; }
     else return;
     renderPills();
   });
@@ -816,6 +845,7 @@
   renderBits();
   renderSpk();
   renderSpkBits();
+  renderSpkDsp();
   renderDiag();
   refresh();
 })();

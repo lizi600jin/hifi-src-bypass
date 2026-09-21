@@ -110,6 +110,21 @@ LOG="$STATE/last.log"
 
   if [ "$missing" = 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: all patched targets still live" >> "$LOG"
+    # WP1: re-assert the ADSP bit-width enforce property once per boot when the
+    # config asks for it.  The HAL may have started before late_start and read
+    # nothing (first boot after enabling), and a repeated setprop is idempotent.
+    # Reading the knob straight from config.conf keeps this a pure property
+    # action with no audio-stack dependency; `hifi apply` remains the primary
+    # injection point (run on every apply / re-apply).
+    if [ -r "$STATE/config.conf" ]; then
+      _dsp="$(sed -n 's/^SPK_DSP_BITS=//p' "$STATE/config.conf" 2>/dev/null | head -n1)"
+      case "$_dsp" in
+        24|32)
+          setprop persist.vendor.audio_hal.dsp_bit_width_enforce_mode "$_dsp" 2>/dev/null \
+            && echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: dsp_bit_width_enforce_mode=$_dsp re-asserted" >> "$LOG"
+          ;;
+      esac
+    fi
     snap "all live"
   fi
   if [ "$missing" = -1 ]; then

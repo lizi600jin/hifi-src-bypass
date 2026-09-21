@@ -99,6 +99,13 @@ SPK_RATE=auto
 # Bit-depth ceiling for the speaker / earpiece device ports.  16 = factory
 # (the historical behaviour: mixer-class ports never get extra depths).
 SPK_BITS=16
+# ADSP bit-width enforce knob: the QTI audio HAL natively reads the system
+# property persist.vendor.audio_hal.dsp_bit_width_enforce_mode at start-up
+# and forces the ADSP ASM streams to the given bit width through the
+# "ASM Bit Width" mixer control.  16 = never inject anything (factory
+# behaviour), 24 / 32 = inject on every `hifi apply`.  Pure property layer:
+# no policy file is touched by this knob.
+SPK_DSP_BITS=16
 
 DIRECT_POOL="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
 USB_POOL="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
@@ -108,6 +115,7 @@ ALL_HIFI="auto 44100 48000 96000 176400 192000 352800 384000"
 ALL_BITS="16 24 32"
 ALL_SPK="auto 44100 48000 96000 192000 384000"
 ALL_SPK_BITS="16 24 32"
+ALL_SPKDSP="16 24 32"
 
 # ------------------------------------------------------------------ candidates
 # Canonical locations, in the order the vendors actually use them.  Every one
@@ -273,6 +281,7 @@ load_conf() {
   ok=0
   for b in $ALL_SPK_BITS; do [ "$b" = "$SPK_BITS" ] && ok=1; done
   [ "$ok" = 1 ] || SPK_BITS=16
+  case "$SPK_DSP_BITS" in 16|24|32) ;; *) SPK_DSP_BITS=16 ;; esac
   return 0
 }
 
@@ -306,6 +315,11 @@ SPK_RATE=$SPK_RATE
 #              (16 / 24 / 32).  16 = 保持原厂 (mixer-class ports get nothing
 #              added), 24 / 32 = 补齐 24 / 32-bit 到扬声器/听筒端口.
 SPK_BITS=$SPK_BITS
+# SPK_DSP_BITS : ADSP bit-width enforce mode.  Injected as the system
+#              property persist.vendor.audio_hal.dsp_bit_width_enforce_mode
+#              on every apply (24 / 32).  16 = nothing is injected; a value
+#              left on the system is only cleared by hifi restore.
+SPK_DSP_BITS=$SPK_DSP_BITS
 # ENABLED    : 1 = patch mounted, 0 = factory policy in use
 ENABLED=$ENABLED
 # RESTART    : 1 = restart the audio stack right after applying, 0 = reboot later
@@ -995,6 +1009,7 @@ status_json() {
   printf '  "bit_depth": %s,\n' "$BIT_DEPTH"
   printf '  "spk_rate": "%s",\n' "$SPK_RATE"
   printf '  "spk_bits": %s,\n' "$SPK_BITS"
+  printf '  "spk_dsp_bits": %s,\n' "$SPK_DSP_BITS"
   printf '  "bit_profiles": "%s",\n' "$(bitdepth_profiles "$BIT_DEPTH")"
   printf '  "restart": %s,\n' "$RESTART"
   printf '  "rates": [%s],\n' "$(printf '%s' "$ALL_RATES" | tr ' ' ',')"
@@ -1060,6 +1075,7 @@ HiFi SRC Bypass  (universal USB / wired SRC bypass)
   speaker bits   : ${SPK_BITS}bit$([ "$SPK_BITS" = 16 ] && echo " (factory)" || echo " -> speaker/earpiece ports extended to ${SPK_BITS}bit")
   ceilings avail : $ALL_RATES
   bitdepth avail : $ALL_BITS
+  dsp enforce    : $SPK_DSP_BITS$([ "$SPK_DSP_BITS" = 16 ] && echo " (off: no property injected)" || echo " -> persist.vendor.audio_hal.dsp_bit_width_enforce_mode=$SPK_DSP_BITS on apply")
   device / sdk   : $(getprop ro.product.device) / $(getprop ro.build.version.sdk)
   selinux        : $(getenforce 2>/dev/null || echo unknown)
   audio service  : $(getprop init.svc.audioserver)
@@ -1281,6 +1297,16 @@ do_apply() {
   fi
   # refresh the snapshot: otherwise it still describes the *previous* boot,
   # which is exactly the wrong thing to hand to whoever is debugging
+  # WP1: force the ADSP bit width when the user asked for it.  Pure property
+  # injection -- the HAL reads it when (re)started, no file is touched.
+  # 16 injects nothing and never clears a previous value: clearing is
+  # restore's job, so a plain re-apply keeps the running mode intact.
+  case "$SPK_DSP_BITS" in
+    24|32)
+      setprop persist.vendor.audio_hal.dsp_bit_width_enforce_mode "$SPK_DSP_BITS" \
+        && log "dsp_bit_width_enforce_mode=$SPK_DSP_BITS injected (takes effect when the audio HAL restarts)"
+      ;;
+  esac
   do_report >/dev/null 2>&1
   return 0
 }
@@ -1302,6 +1328,22 @@ do_restore() {
         cp -f "$stk" "$live" 2>/dev/null && log "factory file written back: $live"
       fi
     done < "$TGT"
+  fi
+  # WP1: pull the ADSP bit-width enforce property back out.  Restore must
+  # leave zero module state behind, and setprop depends on no audio service,
+  # so it is safe even on a crash-looping stack (the P0-5 rule).
+  case "$SPK_DSP_BITS" in
+    24|32) _clear_dsp=1 ;;
+    *)     _clear_dsp=0 ;;
+  esac
+  # a value left over from an older config must go too: query, then clear
+  if [ "$_clear_dsp" = 0 ] \
+     && [ -n "$(getprop persist.vendor.audio_hal.dsp_bit_width_enforce_mode 2>/dev/null)" ]; then
+    _clear_dsp=1
+  fi
+  if [ "$_clear_dsp" = 1 ]; then
+    setprop persist.vendor.audio_hal.dsp_bit_width_enforce_mode "" \
+      && log "dsp_bit_width_enforce_mode cleared (factory ADSP bit width restored)"
   fi
   log "factory policy is in use again; the module stays installed but inert"
   log "re-enable with: hifi apply   (or the WebUI button)"
@@ -1347,6 +1389,11 @@ do_set() {
       for b in $ALL_SPK_BITS; do [ "$b" = "$val" ] && ok=1; done
       [ "$ok" = 1 ] || { echo "spkbits must be one of: $ALL_SPK_BITS"; return 1; }
       SPK_BITS="$val" ;;
+    spkdsp|spk_dsp_bits)
+      ok=0
+      for b in $ALL_SPKDSP; do [ "$b" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "spkdsp must be one of: $ALL_SPKDSP"; return 1; }
+      SPK_DSP_BITS="$val" ;;
     enabled|enable)
       case "$val" in 1|on|true) ENABLED=1 ;; 0|off|false) ENABLED=0 ;;
         *) echo "enabled must be 0 or 1"; return 1 ;; esac ;;
@@ -1374,6 +1421,8 @@ do_set() {
       printf 'run: hifi apply   (and, for a changed ceiling, hifi restore first)\n' ;;
     spk|spk_rate)
       printf 'run: hifi apply\n' ;;
+    spkdsp|spk_dsp_bits)
+      printf 'run: hifi apply   (16 = off: nothing is injected, an old value is cleared by hifi restore)\n' ;;
   esac
   return 0
 }
@@ -1656,6 +1705,9 @@ HiFi SRC Bypass  (universal)   v1.9.1
   hifi set bitdepth 24     USB / wired output bit-depth ceiling (16 / 24 / 32)
   hifi set spk 48000       speaker / earpiece port rate pinned to a single value,
                            auto = 原厂 (mixer mixPorts stay with MIXER_RATE)
+  hifi set spkdsp 24       force the ADSP speaker bit width via the HAL
+                           dsp_bit_width_enforce_mode property (16 / 24 / 32;
+                           16 = off, injected on apply, cleared on restore)
   hifi set spkbits 24      speaker / earpiece bit-depth ceiling (16 / 24 / 32),
                            16 = 保持原厂
   hifi set restart 1       restart the audio stack after applying (1 / 0)
@@ -1700,8 +1752,8 @@ case "${1:-status}" in
   status)     ensure_dirs; load_conf; do_status ;;
   dac)        ensure_dirs; load_conf; cmd_dac ;;
   json)       ensure_dirs; load_conf; status_json ;;
-  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\nspk options     : %s\nspkbit options  : %s\n' \
-                     "$ALL_RATES" "$ALL_MIXER" "$ALL_HIFI" "$ALL_BITS" "$ALL_SPK" "$ALL_SPK_BITS" ;;
+  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\nspk options     : %s\nspkbit options  : %s\nspkdsp options  : %s\n' \
+                     "$ALL_RATES" "$ALL_MIXER" "$ALL_HIFI" "$ALL_BITS" "$ALL_SPK" "$ALL_SPK_BITS" "$ALL_SPKDSP" ;;
   scan)       ensure_dirs; load_conf; prepare || true; do_ports ;;
   ports)      ensure_dirs; load_conf; do_ports ;;
   files)      ensure_dirs; load_conf; do_files ;;
