@@ -119,7 +119,7 @@
 
   var state = {
     mod: null, mixer: 48000, max: 384000, bits: 32, hifi: 'auto',
-    spk: 'auto', spkBits: 16, spkDsp: 16,
+    spk: 'auto', spkBits: 16, spkDsp: 16, bp: 0, dialect: '',
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -402,6 +402,31 @@
     });
   }
 
+  function renderBp() {
+    var host = $('pillBp');
+    if (!host) return;
+    Array.prototype.forEach.call(host.children, function (el) {
+      el.className = 'pill' + (Number(state.bp) === Number(el.dataset.bp) ? ' sel' : '');
+    });
+    var hint = $('bpDialect');
+    if (hint) {
+      if (Number(state.bp) === 1) {
+        if (state.dialect === 'aosp') {
+          hint.textContent = '本机是 HIDL 方言：BIT_PERFECT 不受 Android 支持，应用会被拒绝。';
+          hint.hidden = false;
+        } else if (state.dialect === 'qti') {
+          hint.textContent = '本机是 AIDL 方言：声明可以生效，但需要播放器用 preferred mixer attributes API 请求（Android 14+）。';
+          hint.hidden = false;
+        } else {
+          hint.textContent = '方言未知：应用时以设备端探测为准。';
+          hint.hidden = false;
+        }
+      } else {
+        hint.hidden = true;
+      }
+    }
+  }
+
   /* self test: everything we need to diagnose a failure remotely */
   function renderDiag() {
     var el = $('diagBox');
@@ -431,6 +456,8 @@
     state.spk = s.spk_rate || 'auto';
     state.spkBits = Number(s.spk_bits) || 16;
     state.spkDsp = Number(s.spk_dsp_bits) || 16;
+    state.bp = Number(s.bit_perfect) || 0;
+    state.dialect = s.dialect || '';
     state.restart = !(s.restart === 0 || s.restart === false);
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
@@ -642,6 +669,7 @@
       .then(function () { return hifi('set spk ' + state.spk); })
       .then(function () { return hifi('set spkbits ' + state.spkBits); })
       .then(function () { return hifi('set spkdsp ' + state.spkDsp); })
+      .then(function () { return hifi('set bitperfect ' + (state.bp ? 1 : 0)); })
       .then(function () { return hifi('set restart ' + (state.restart ? 1 : 0)); })
       .then(function () { return hifi('set enabled 1'); })
       .then(function () { return hifi('apply'); })
@@ -798,6 +826,7 @@
     else if (host.id === 'pillBits') { state.bits = Number(el.dataset.b); renderBits(); return; }
     else if (host.id === 'pillSpk') { state.spk = el.dataset.v === 'auto' ? 'auto' : Number(el.dataset.v); renderSpk(); return; }
     else if (host.id === 'pillSpkBits') { state.spkBits = Number(el.dataset.b); renderSpkBits(); return; }
+    else if (host.id === 'pillBp') { state.bp = Number(el.dataset.bp); renderBp(); return; }
     else if (host.id === 'pillSpkDsp') { state.spkDsp = Number(el.dataset.d); renderSpkDsp(); return; }
     else return;
     renderPills();
@@ -846,6 +875,7 @@
   renderSpk();
   renderSpkBits();
   renderSpkDsp();
+  renderBp();
   renderDiag();
   refresh();
 })();

@@ -40,18 +40,45 @@ END {
   fail = 0
 
   # -------------------------------------------------- 1. skeleton equality
-  if (S1N != S2N) {
+  # BP mode: the patched skeleton may additionally carry exactly ONE port
+  # block -- the BIT_PERFECT hifi_output mixPort.  Its <profile> children are
+  # stripped from skeletons anyway, so the block is the open line + the close
+  # line.  bpskip remembers that those two lines are allowance-only and every
+  # comparison below walks S2 with the offset applied.
+  bpallow = (BP + 0 == 1)
+  bpskip = 0
+  if (bpallow) {
+    for (i = 1; i <= S2N; i++) {
+      if (S2[i] ~ /^<mixPort name="hifi_output" role="source" flags="BIT_PERFECT">$/) {
+        bpskip = 2
+        break
+      }
+      if (S2[i] != S1[i]) break
+    }
+    if (bpskip == 2) printf("ok   bit-perfect skeleton: one hifi_output port block accepted\n")
+  }
+  if (S1N != S2N - bpskip) {
     printf("FAIL skeleton: stock has %d structural line(s), patched has %d\n", S1N, S2N)
     fail = 1
     show_around()
   } else {
     bad = 0
-    for (i = 1; i <= S1N; i++) {
-      if (S1[i] != S2[i]) {
+    j = 0
+    for (i = 1; i <= S2N; i++) {
+      if (bpskip > 0 && S2[i] ~ /^<mixPort name="hifi_output" role="source" flags="BIT_PERFECT">$/) { i++; continue }
+      j++
+      cmp = S2[i]
+      if (bpskip > 0) {
+        v = attr(cmp, "sources")
+        if (v != "" && v ~ /,hifi_output$/) {
+          cmp = setattr(cmp, "sources", substr(v, 1, length(v) - length(",hifi_output")))
+        }
+      }
+      if (S1[j] != cmp) {
         if (bad < 5) {
-          printf("FAIL skeleton line %d:\n", i)
-          printf("     stock  : <%s>\n", S1[i])
-          printf("     patched: <%s>\n", S2[i])
+          printf("FAIL skeleton line %d:\n", j)
+          printf("     stock  : <%s>\n", S1[j])
+          printf("     patched: <%s>\n", cmp)
         }
         bad++
       }
@@ -61,17 +88,52 @@ END {
   }
 
   # ------------------------------------------- 2. port / route inventories
+  # BP mode (-v BP=1) allows exactly ONE port addition: the BIT_PERFECT
+  # "hifi_output" mixPort.  Everything else in the inventory stays strict.
+  bpallow = (BP + 0 == 1)
   for (k in P1) if (!(k in P2)) { printf("FAIL port removed: %s\n", k); fail = 1 }
-  for (k in P2) if (!(k in P1)) { printf("FAIL port added  : %s\n", k); fail = 1 }
-  for (k in R1) if (!(k in R2)) { printf("FAIL route removed: %s\n", k); fail = 1 }
-  for (k in R2) if (!(k in R1)) { printf("FAIL route added  : %s\n", k); fail = 1 }
+  for (k in P2) if (!(k in P1)) {
+    if (bpallow && k == "mixPort:hifi_output") { bpn++; continue }
+    printf("FAIL port added  : %s\n", k); fail = 1
+  }
+  # BP splice bookkeeping: R2S holds every patched route with the
+  # ",hifi_output" splice removed, so "stock route still present" and
+  # "no route was rewritten" both compare against the same normalization.
+  for (k in R2) {
+    v = attr(k, "sources")
+    if (v == "" || v !~ /,hifi_output$/) { R2S[k] = 1; continue }
+    s = substr(v, 1, length(v) - length(",hifi_output"))
+    R2S[setattr(k, "sources", s)] = 1
+  }
+  for (k in R1) if (!(k in R2) && !(k in R2S)) { printf("FAIL route removed: %s\n", k); fail = 1 }
+  for (k in R2) if (!(k in R1) && !(k in R2S)) {
+    # BP mode: an added route line is acceptable only if it is a stock route
+    # with ",hifi_output" spliced into the sources attribute -- same sink,
+    # same order, same everything else.  (Normalized lines end with " />"
+    # after norm(), so the splice point is before that tail.)
+    if (bpallow && bpr_add(k)) continue
+    printf("FAIL route added  : %s\n", k); fail = 1
+  }
   np = 0; for (k in P1) np++
   nr = 0; for (k in R1) nr++
+  if (!fail && bpallow) {
+    if (bpn == 1) printf("ok   bit-perfect port: hifi_output declared once\n")
+    else { printf("FAIL bit-perfect port: expected exactly 1 hifi_output mixPort, got %d\n", bpn); fail = 1 }
+    if (bprn > 0) printf("ok   bit-perfect routes: %d playback route(s) carry hifi_output\n", bprn)
+    if (bprn == 0) { printf("FAIL bit-perfect routes: no playback route references hifi_output\n"); fail = 1 }
+  }
   if (!fail) printf("ok   inventory: %d port(s) and %d route(s) unchanged\n", np, nr)
 
   # ------------------------------------------------------ 3. routes as text
-  if (RQ1 != RQ2) { printf("FAIL route block text changed\n"); fail = 1 }
-  else            printf("ok   route lines: byte-identical (%d line(s))\n", RQN)
+  # BP mode compares the two route blocks under the same ",hifi_output"
+  # suffix rule; without BP the block must be byte-identical.
+  if (RQ1 != RQ2 && !(bpallow && rqb_ok())) {
+    printf("FAIL route block text changed\n"); fail = 1
+  } else if (RQ1 == RQ2) {
+    printf("ok   route lines: byte-identical (%d line(s))\n", RQN)
+  } else {
+    printf("ok   route lines: hifi_output splices only (%d line(s) -> %d)\n", RQN, split(RQ2, dummy2, "\n") - 1)
+  }
 
   # ------------------------------------------------------------- 4. marker
   if (index(HDR2, MARKER) > 0) printf("ok   marker: %s present\n", MARKER)
@@ -125,6 +187,17 @@ function clive(ln,   pos, live, rest, p) {
     }
   }
   return live
+}
+
+function setattr(s, key, val,   pat, i, j) {
+  pat = key "=\""
+  i = index(s, pat)
+  if (i == 0) return s
+  i = i + length(pat)
+  j = i
+  while (j <= length(s) && substr(s, j, 1) != "\"") j++
+  if (j > length(s)) return s
+  return substr(s, 1, i - 1) val substr(s, j)
 }
 
 function norm(s,   t) {
@@ -212,7 +285,7 @@ function build(f,   i, n, ln, live, t) {
     if (f == 1) S1[sn] = t; else S2[sn] = t
     tail = t
   }
-  if (f == 1) { S1N = sn; T1 = tail; HDR1 = hdr; RQ1 = rg; RQN = split(rg, dummy, "\n") - 1 }
+  if (f == 1) { S1N = sn; T1 = tail; HDR1 = hdr; RQ1 = rg; RQN = split(rg, dummy, "\n") - 1; for (k2 in R1) R1ver[k2] = 1 }
   else        { S2N = sn; T2 = tail; HDR2 = hdr; RQ2 = rg }
 }
 
@@ -221,4 +294,41 @@ function show_around(   i) {
   for (i = 1; i <= (S1N < 6 ? S1N : 6); i++) printf("       %2d| %s\n", i, S1[i])
   printf("     first patched structural lines:\n")
   for (i = 1; i <= (S2N < 6 ? S2N : 6); i++) printf("       %2d| %s\n", i, S2[i])
+}
+
+# ------------------------------------------------- BIT_PERFECT allow helpers
+# bpr_add(k): is normalized route line k exactly a stock route with
+# ",hifi_output" spliced into its sources attribute (and nothing else moved)?
+function bpr_add(k,    pos, val, stripped) {
+  # Accept a normalized route line ONLY if removing the ",hifi_output"
+  # suffix from its sources value yields a line that exists verbatim in the
+  # stock route set R1.  Everything else (sink, order, spacing, other
+  # attributes) must be untouched, because the line is rebuilt from k and
+  # compared against R1 as a whole key.
+  val = attr(k, "sources")
+  if (val == "") return 0
+  if (val !~ /,hifi_output$/) return 0
+  stripped = substr(val, 1, length(val) - length(",hifi_output"))
+  if (stripped == "") return 0
+  pos = index(k, "sources=\"" val "\"")
+  if (pos == 0) return 0
+  base = substr(k, 1, pos - 1) "sources=\"" stripped "\"" substr(k, pos + length("sources=\"" val "\""))
+  if (base in R1) { bprn++; return 1 }
+  return 0
+}
+# rqb_ok(): every patched route line is either a verbatim stock line or a
+# stock line with the ",hifi_output" splice; nothing added, nothing removed.
+function rqb_ok(   n2, i, ln, a, ok) {
+  n2 = split(RQ2, a, "\n") - 1
+  if (n2 < RQN) return 0
+  ok = 1
+  for (i = 2; i <= n2 + 1; i++) {
+    ln = a[i]
+    if (ln == "") continue
+    if (ln in R1ver) continue
+    if (bpr_add(ln)) continue
+    ok = 0
+    break
+  }
+  return ok
 }

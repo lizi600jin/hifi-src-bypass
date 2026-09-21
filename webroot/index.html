@@ -142,6 +142,16 @@
       </div>
     </div>
 
+    <div class="field">
+      <label>BIT_PERFECT 输出通道（实验 · 仅 AIDL）</label>
+      <p class="hint">声明 Android 14+ 的 BIT_PERFECT 输出端口（hifi_output）并接入各播放路由。<strong>仅 AIDL 方言（高通新机型）生效</strong>：HIDL 机型在「应用」时会被直接拒绝。播放器须用 preferred mixer attributes API 主动请求，未请求则走原混音路径，无副作用。</p>
+      <p class="hint" id="bpDialect" hidden></p>
+      <div class="pills" id="pillBp">
+        <button class="pill" data-bp="0">关闭<em>默认 · v1.9.1 行为</em></button>
+        <button class="pill" data-bp="1">开启（实验）<em>需要播放器主动请求</em></button>
+      </div>
+    </div>
+
     <div class="field row">
       <div>
         <label>应用后自动重启音频服务</label>

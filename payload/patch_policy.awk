@@ -18,6 +18,20 @@
 #            (Android 16): the live port went 384000 -> 192000 Hz, so a 192k
 #            source plays with zero resampling instead of an upsampling 2x.
 #
+#   BP     : 1 = declare the Android 14+ BIT_PERFECT output channel.  ONE new
+#            mixPort ("hifi_output", flags "BIT_PERFECT") is appended to the
+#            primary module and its name is added to the sources of every sink
+#            mix-route, so a player can claim the port through the "preferred
+#            mixer attributes" API (Android 14+) and get a BitPerfect output
+#            thread -- mixed output with no AudioFlinger mixer and no SRC.
+#            Officially supported on the AIDL audio HAL only
+#            (source.android.com/docs/core/audio/preferred-mixer-attr), i.e.
+#            this patcher's "qti" dialect: on an AOSP/HIDL file BP=1 is
+#            refused with exit 2 BEFORE a single output line is produced.
+#            Without a player request the extra port is inert: playback takes
+#            the stock mixing path and nothing else changes.
+#            BP unset / 0 = exactly the v1.9.1 behaviour, byte for byte.
+#
 # WHY THIS EXISTS
 #   The previous generation of this module shipped a *device* template: a full
 #   copy of the OnePlus 13 factory policy with @TOKEN@ placeholders, expanded
@@ -87,6 +101,11 @@ BEGIN {
   # 24 / 32 lifts the historical "no bit-depth fill on mixer class" exclusion
   # for the speaker / earpiece *device* ports (mixer mixPorts stay untouched).
   if (SPKBITS == "") SPKBITS = 16
+  # BP defaults to 0: the v1.9.1 behaviour, byte for byte.  With BP=1 an extra
+  # BIT_PERFECT mixPort ("hifi_output") is declared in the END block -- and
+  # ONLY on the AIDL ("qti") dialect; the refusal of an AOSP/HIDL file happens
+  # there as well, before any output line is emitted (see emit_bp below).
+  if (BP == "") BP = 0
 }
 
 { N++; L[N] = $0 }
@@ -385,6 +404,125 @@ function emit_hifi(bn, name,   i, k, ind, head, op, b, prof, np, PLN) {
   PORTS = PORTS (PORTS == "" ? "" : ",") "mix:" name "=HIFI"
 }
 
+# ================================================== BIT_PERFECT declaration
+# (BP=1, qti dialect only -- the red line: APPEND-ONLY, everything stock is
+#  carried through unmodified; on any other dialect the caller is refused in
+#  the END block BEFORE a single output line exists)
+#
+# ONE new mixPort is appended to the primary module:
+#
+#     <mixPort name="hifi_output" role="source" flags="BIT_PERFECT">
+#         <profile samplingRates="..." channelLayouts="LAYOUT_MONO LAYOUT_STEREO"
+#                  formatType="PCM" pcmType="INT_16_BIT" /> ... INT_24/INT_32
+#     </mixPort>
+#
+# The profile set is the same full-rate / full-depth grid the patcher already
+# writes elsewhere (rates = union(factory mixer rates, DEV_POOL) capped at
+# CEIL; depths = 16 plus 24/32 up to BITS).  QTI/AIDL attribute spelling is
+# the only one generated, because a BIT_PERFECT declaration is only honoured
+# on the AIDL audio HAL in the first place.
+#
+# The name is then added to the sources of every type="mix" route whose sink
+# is a devicePort of THIS module (speaker, USB, wired, ...).  Routes are the
+# only place a mixPort becomes reachable; a declared port without a route is
+# dead weight, and appending "hifi_output" to the existing sources list is the
+# additive-only way to make it reachable.  Input/telephony route types and
+# every other line are passed through untouched.
+#
+# Indentation for the new lines is taken from the file itself, so the output
+# stays in the phone's own style.
+function emit_bp(   i, k, j, ind, pref, srcs, body, b, n, no, done, ln2, rw, rwprev, line) {
+  # -- 1. derive the indentation from the first real <mixPort> line ---------
+  ind = "        "
+  pref = "            "
+  for (i = 1; i <= N; i++) {
+    if (CLIVE[i] ~ /^[ \t]*<mixPort[ \t>]/) {
+      ind = L[i]; sub(/[^ \t].*$/, "", ind)
+      for (k = i + 1; k <= N && CLIVE[k] !~ /<\/mixPorts>/; k++) {
+        if (CLIVE[k] ~ /^[ \t]+[^ \t]/) { pref = L[k]; sub(/[^ \t].*$/, "", pref); break }
+      }
+      break
+    }
+  }
+
+  # -- 2. build the new mixPort block, cloning the patcher's own grid -------
+  body = ind "<mixPort name=\"hifi_output\" role=\"source\" flags=\"BIT_PERFECT\">"
+  for (b = 16; b <= 32; b += 8) {
+    if ((BITS + 0) < b) continue          # respect the user's bit-depth tier
+    body = body "\n" pref "<profile samplingRates=\"" BP_RATES "\" channelLayouts=\"LAYOUT_MONO LAYOUT_STEREO\" formatType=\"PCM\" pcmType=\"" fmt_name(b) "\" />"
+  }
+  body = body "\n" ind "</mixPort>"
+
+  n = split(body, BP_LINES, "\n")
+
+  # -- 3. append the port right after the closing </mixPorts> ---------------
+  #     (single pass, one flag: the guard makes an accidental double run a
+  #      no-op, which is what keeps the second apply byte-identical)
+  # Buffer surgery on O, not a second emission: the END loop has already
+  # re-emitted every stock line (rewritten ports included) into O. All that
+  # is left here is (a) to splice BP_LINES right after the </mixPorts> line
+  # inside O and (b) to append the port name to the PLAYBACK route lines
+  # already sitting in O. Doing it this way keeps the stock pass and the BP
+  # pass strictly ordered and never duplicates a line.
+  # idempotency guard: if the buffer already declares the port (a patched
+  # file being re-run), nothing in this function may fire again.
+  already = 0
+  for (j = 1; j <= ON; j++) if (O[j] ~ /<mixPort name="hifi_output"/) already = 1
+  if (already) {
+    # re-run on a patched file: never duplicate the port, but keep the
+    # provenance tag so the header stays descriptive
+    if (PORTS !~ /mix:hifi_output=BITPERFECT/) {
+      PORTS = PORTS (PORTS == "" ? "" : ",") "mix:hifi_output=BITPERFECT"
+      CHANGED = 1
+    }
+    return
+  }
+  done = 0
+  no = 0
+  for (j = 1; j <= ON; j++) {
+    ln2 = O[j]
+    if (!done && ln2 ~ /^[ \t]*<\/mixPorts>[ \t]*$/) {
+      no++
+      O2[no] = ln2
+      for (k = 1; k <= n; k++) { no++; O2[no] = BP_LINES[k] }
+      done = 1
+      continue
+    }
+    # a route element is either on ONE line (<route ... sources="..." />) or
+    # wrapped, with sources="..." on the continuation line.
+    #   opens_route : this line opens a type="mix" route element
+    #   has_sources : this line carries the sources attribute
+    # append when (opens_route && has_sources)  -- single-line form
+    #         or (rwprev && has_sources)        -- wrapped form
+    # rwprev remembers "previous line opened a mix route with no sources yet".
+    opens_route = (ln2 ~ /^[ \t]*<route[ \t]/ && ln2 ~ /type="mix"/)
+    has_sources = (ln2 ~ /sources="/)
+    if (has_sources && (opens_route || rwprev) && ln2 !~ /hifi_output/) {
+      srcs = attr(ln2, "sources")
+      # playback routes only: a sink whose existing sources are all INPUT
+      # mixPorts (mic capture, voice_rx downlink, ...) must NOT get an output
+      # port appended -- it would be a policy-parse error, not a no-op.
+      # Output sinks all take their audio from the shared output mixPorts
+      # (low_latency_out / deep_buffer_out / ...), so the presence of one of
+      # those in the list is the safe, dialect-correct test.
+      if (srcs != "" && srcs ~ /(^|,)(low_latency_out|deep_buffer_out|direct_pcm_out|compress_offload_out|voip_playback|raw_out|mmap_no_irq_out)(,|$)/) {
+        ln2 = setattr(ln2, "sources", srcs ",hifi_output")
+      }
+    }
+    rwprev = (opens_route && !has_sources)
+    no++
+    O2[no] = ln2
+  }
+  if (!done) return                        # no </mixPorts> in the buffer: no-op
+  for (j = 1; j <= no; j++) O[j] = O2[j]
+  ON = no
+  if (!done) return                        # no </mixPorts>: leave everything
+
+  CHANGED = 1
+  NPORT++
+  PORTS = PORTS (PORTS == "" ? "" : ",") "mix:hifi_output=BITPERFECT"
+}
+
 # Work in *element* units, never in physical-line units: Qualcomm's AOSP-style
 # files wrap a single <profile> over four lines, so a line-oriented rewriter
 # would never even see the samplingRates attribute.  The original line breaks
@@ -513,6 +651,18 @@ END {
   }
   DIA  = (qti >= aosp) ? "qti" : "aosp"
   FKEY = (DIA == "qti") ? "pcmType" : "format"
+  # BIT_PERFECT is an AIDL-HAL feature (source.android.com preferred mixer
+  # attributes): a HIDL declaration is inert, so refuse instead of pretending.
+  # Refusing HERE, before the rewrite loop, means no output line has been
+  # produced -- the caller's output file stays empty and nothing is half-done.
+  if ((BP + 0) == 1 && DIA != "qti") {
+    printf("patch_policy: BIT_PERFECT requested but this file is the %s (HIDL) dialect -- Android only honours BIT_PERFECT on the AIDL audio HAL\n", DIA) > "/dev/stderr"
+    exit 2
+  }
+  if ((BP + 0) == 1) {
+    BP_RATES = make_rates(factory_mix(), DEV_POOL, CEIL)
+    if (BP_RATES == "") BP_RATES = "48000"
+  }
   # The rate-list separator is a per-FILE style, not a dialect rule: the AOSP
   # documentation writes spaces, yet the Redmi K20 Pro's HIDL file uses commas
   # and its compressed_offload profile mixes spaces into a comma file.  Infer
@@ -577,7 +727,12 @@ END {
     i++
   }
 
-  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " spk=" SPK " spkbits=" SPKBITS " | generated, do not hand edit -->"
+  # ---- BIT_PERFECT channel (BP=1, qti dialect) -- append-only, AFTER the
+  #      stock-only pass, so every pre-existing port/route line is already
+  #      byte-identical by the time the extra port is added.
+  if ((BP + 0) == 1) emit_bp()
+
+  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " spk=" SPK " spkbits=" SPKBITS (((BP + 0) == 1) ? " bp=1" : "") " | generated, do not hand edit -->"
   hdr2 = "<!-- " MARKER " | ports=" PORTS " | repo: android audio src bypass -->"
 
   start = 1

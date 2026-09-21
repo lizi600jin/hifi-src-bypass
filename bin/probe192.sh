@@ -1157,6 +1157,33 @@ elif [ "${PHONE_ACTIVE_N:-0}" -gt 0 ] || [ "${MEDIA_PLAYING_N:-0}" -gt 0 ] 2>/de
 else
   printf '归属   : 系统无音频播放 —— 播一首歌或插上小尾巴后再跑本校验\n'
 fi
+# ---- BIT_PERFECT channel verdict (read-only): Android 14+ AudioFlinger
+# spins a dedicated output thread for a player that requested bit-perfect
+# output through the preferred mixer attributes API.  In dumpsys
+# media.audio_flinger such a thread shows type 7 / BitPerfect; the policy
+# side (our hifi_output port) only DECLARES the possibility.
+BPF=/data/local/tmp/.hifi_probe_dump_flinger.txt
+dumpsys media.audio_flinger > "$BPF" 2>/dev/null
+BP_THR_N="$(grep -cE 'BitPerfect|type *[:=] *7([ ,]|$)' "$BPF" 2>/dev/null)"
+case "$BP_THR_N" in ''|*[!0-9]*) BP_THR_N=0 ;; esac
+rm -f "$BPF" 2>/dev/null
+if [ "$BP_THR_N" -gt 0 ] 2>/dev/null; then
+  printf '\n⑤b BIT_PERFECT : ✅ 生效 —— AudioFlinger 正在运行 BitPerfect 输出线程（%s 条，dumpsys media.audio_flinger 为证）\n' "$BP_THR_N"
+else
+  BP_DECL=no
+  if [ -r "$TGT" ]; then
+    while IFS='|' read -r bp_live bp_patched bp_stk; do
+      [ -n "$bp_patched" ] || continue
+      grep -q 'name="hifi_output"' "$bp_patched" 2>/dev/null && { BP_DECL=yes; break; }
+    done < "$TGT"
+  fi
+  if [ "$BP_DECL" = yes ]; then
+    printf '\n⑤b BIT_PERFECT : ⚪ 已声明未激活 —— 策略里已有 hifi_output 通道，但此刻没有 BitPerfect 线程在跑（播放器未用 preferred mixer attributes API 请求，或方言不支持）\n'
+  else
+    printf '\n⑤b BIT_PERFECT : ⚪ 未激活（策略未声明 hifi_output，或播放器未请求；BIT_PERFECT=1 时仅 AIDL 方言生效）\n'
+  fi
+fi
+
 printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
 printf '         不开独占时出现 ✅ 模块生效 / ✓ 直通 / ✓ HiFi 通道 = 模块在链路上正常干预；\n'
 printf '         出现 ℹ️ usbfs 接管 = 独占已开（App 直连 DAC，模块在链路外，属正常形态）；\n'
