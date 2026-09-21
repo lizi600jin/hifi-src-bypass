@@ -1160,6 +1160,7 @@ do_report() {
     printf '\n-- live bind mounts --\n'
     awk '$2 ~ /alsautils|audio_policy|audio_module_config/ { print "  " $1 " -> " $2 }' "$MOUNTS" 2>/dev/null
     printf '\n-- USB HAL libraries on this ROM, and the ceiling in each --\n'
+    printf '  (ALREADY-UNLOCKED = the library is already at the requested ceiling -- healthy steady state, nothing to fix)\n'
     seen=""
     for hd in $HAL_DIRS; do
       for hl in $HAL_LIBS; do
@@ -1172,7 +1173,16 @@ do_report() {
         seen="$seen $hr"
         hmsg="$(sh "$HALPATCH" --check "$hr" "$MAX_RATE" 2>&1)"
         hrc=$?
-        printf '  %-44s rc=%s %s\n' "$hr" "$hrc" "$hmsg"
+        # decode the probe's exit code into a plain-language status word so
+        # non-technical users stop reading healthy steady states as errors
+        case "$hrc" in
+          0) hstat=FACTORY-TABLE ;;
+          4|7) hstat=ALREADY-UNLOCKED ;;
+          3) hstat=NOT-USB-HAL ;;
+          6) hstat=TABLE-TWICE ;;
+          *) hstat=REFUSED ;;
+        esac
+        printf '  %-44s rc=%s [%s] %s\n' "$hr" "$hrc" "$hstat" "$hmsg"
       done
     done
     printf '\n-- archived factory copies --\n'
