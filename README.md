@@ -85,6 +85,19 @@
 
 ---
 
+## ✅ 已验证机型
+
+| 机型 | SoC | 系统 | 方言 | 模块版本 | 结果 |
+|---|---|---|---|---|---|
+| Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v1.9.0 | ✅ 7 策略 + 2 HAL 挂载；mixer=44100 / hifi=192000 / bits=32 / SPK=44100 / SPKBITS=24；13 首实测 10/13 完美保 0 |
+| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v1.9.0 | ✅ 6 策略 + 4 HAL 挂载；mixer=192000 / hifi=192000 / bits=32 / SPK=96000 / SPKBITS=24；Earpiece @ 96000Hz |
+| vivo PD2408 (`V2408A`) | SM8750 (sun) | OriginOS, Android 16 (SDK 36) | QTI AIDL | v1.9.0 | ✅ 2 策略 + 4 HAL 挂载，boot 干净（2026-09-21 社区回传） |
+
+> 首台 vivo 实机数据点：vivo PD2408 上 `libalsautils{,v2}.so` lib64/lib 双层共 4 个库齐全、
+> AIDL 策略配置 2 份均可改写挂载 —— 推翻了此前「vivo 不用 AOSP 的 `libalsautils*so`、第二层没有目标」的调研推断（见 §2.1 vivo 行的更正）。
+
+---
+
 ## 1. 它解决了什么：为什么「改完 XML 还是 96 kHz」
 
 Android 上其实存在**两个互相独立的上限**，绝大多数教程只处理了上面那个。
@@ -227,7 +240,7 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 |---|---|---|
 | 小米 · 红米（HyperOS，高通） | ✅ **已实测有效** | 红米 K20 Pro（SM8150）：384000 Hz / PCM_32_BIT 实时直通 |
 | 一加 · OPPO · realme（ColorOS，高通 AIDL） | ✅ **已实测有效** | 一加 13（SM8750）：384k/32bit 直通、192k/24bit + 混音 44.1k 均无异常 |
-| vivo · iQOO（OriginOS / Funtouch，高通与联发科） | ➖ **大概率无需本模块**（未实测真机） | 调研结论（2026-09）：vivo/iQOO **不用 AOSP 的 `libalsautils*so`**（自研 USB HAL），第二层没有目标；但高通旗舰在 OriginOS 下 **USB DAC 原生跟随音源切换采样率、不做全局 SRC**，天玑机型则普遍锁 48k。亦即：高通平台**本来就没有 SRC 问题**，天玑平台锁死在 HAL 层 —— 两条路都轮不到本模块出手。个别 Hi-Fi 机型另有自研通路，与本模块无关 |
+| vivo · iQOO（OriginOS / Funtouch，高通与联发科） | ⚠️ **部分机型已实测有效（vivo PD2408，2026-09-21 社区回传）** | 首台 vivo 实机（PD2408 / SM8750 / OriginOS Android 16）推翻了早期调研：该机**带全套 AOSP 的 `libalsautils{,v2}.so`（lib64 + lib 共 4 个）**，AIDL 策略配置 2 份可改写挂载，两层全部生效（详见「已验证机型」表）。注意该机 v1.9.0 只做了挂载层验证（boot verify 通过），**未插小尾巴、未跑逐 App 听音验证**；天玑机型与早期「vivo 自研 USB HAL」的调研结论是否适用于其它 vivo 机型仍待更多数据 —— 遇到没覆盖到的机型照旧发 `hifi report` |
 | 努比亚 · 红魔（nubia UI / RedMagic OS，骁龙） | ✅ **大概率有效**（未实测真机） | 调研结论（2026-09）：沿袭 **CAF 音频栈**，策略文件就是 AOSP 那两路（HIDL `/vendor/etc/audio_policy_configuration.xml` 或 AIDL `/odm`/`/vendor` 的 AIDL 配置），**带 AOSP 的 `libalsautils.so` 与那张 52 字节采样率表** —— 与已验证的红米 K20 Pro 同一原理；`samplingRates` 用空格分隔（AOSP 规范风格，本模块按文件自身风格推断）。红魔的 DTS 音效属于上层效果链，不影响两层的改造 |
 | 荣耀（MagicOS，高通 / 联发科） | ⚠️ 可能有效（未实测） | MagicOS 基于 AOSP，策略路径与米系 / O 系接近；但荣耀保留了自家音效与调优通路，仍需以实测为准 |
 | 华为（麒麟 + 鸿蒙） | ❌ **厂商限制，预计无法生效** | 华为使用**自研音频 HAL**，通常不带 AOSP 那张采样率表，第二层没有目标；自 HarmonyOS NEXT 起已不再基于 AOSP，策略文件的格式与路径同本项目的前提完全不同，第一层也难以下手；加之其分区完整性校验更严格，systemless 挂载更容易被拒 |
