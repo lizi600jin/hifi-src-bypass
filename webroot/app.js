@@ -119,7 +119,7 @@
 
   var state = {
     mod: null, mixer: 48000, max: 384000, bits: 32, hifi: 'auto',
-    spk: 'auto', spkBits: 16, spkDsp: 16, bp: 0, dialect: '', sdk: '',
+    spk: 'auto', spkBits: 16, spkDsp: 16,
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -411,60 +411,9 @@
      "unknown" -- and the device refuses an unknown SDK.  Both conditions are
      therefore rendered separately: a user must never be told "it works" when
      the version alone will get the apply refused. */
-  function bpSdkState() {
-    if (state.sdk === undefined || state.sdk === null || state.sdk === '') return 'unknown';
-    var n = parseInt(state.sdk, 10);
-    if (isNaN(n)) return 'unknown';
-    return n >= 34 ? 'ok' : 'old';
-  }
-
-  function renderBp() {
-    var host = $('pillBp');
-    if (!host) return;
-    Array.prototype.forEach.call(host.children, function (el) {
-      el.className = 'pill' + (Number(state.bp) === Number(el.dataset.bp) ? ' sel' : '');
-    });
-    var hint = $('bpDialect');
-    if (hint) {
-      if (Number(state.bp) === 1) {
-        /* The branch order mirrors the DEVICE gate exactly -- dialect first,
-           then the version inside the AIDL case (bin/hifi do_apply, and the
-           END block of payload/patch_policy.awk).  Keeping that shape also
-           keeps the copy honest: only a `qti` dialect may be told "your
-           version is the problem", because an empty dialect means the probe
-           could not classify the device at all (bin/hifi: "" = unknown). */
-        var dia = state.dialect === 'qti' ? 'qti'
-                : (state.dialect === 'aosp' ? 'aosp' : 'unknown');
-        if (dia === 'aosp') {
-          hint.textContent = '本机是 HIDL 方言：BIT_PERFECT 不受 Android 支持，应用会被拒绝（不会卡开机、不会死机，其余档位照常）。';
-        } else if (dia === 'qti') {
-          var sdk = bpSdkState();
-          if (sdk === 'old') {
-            hint.textContent = '本机是 AIDL 方言，但版本不足：BIT_PERFECT 需要 Android 14+（SDK 34+），本机 SDK ' +
-              parseInt(state.sdk, 10) + '，应用会被拒绝（不改动任何文件，其余档位照常）。';
-          } else if (sdk === 'unknown') {
-            hint.textContent = '本机是 AIDL 方言，但读不到版本号（ro.build.version.sdk）：BIT_PERFECT 需要 Android 14+（SDK 34+），无法确认时会被拒绝（不改动任何文件，其余档位照常）。';
-          } else {
-            hint.textContent = '本机是 AIDL 方言且版本满足（SDK ' + parseInt(state.sdk, 10) +
-              '）：声明可以生效，但需要播放器用 preferred mixer attributes API 请求（Android 14+）。';
-          }
-        } else {
-          /* Dialect unknown: never claim AIDL or HIDL here.  State both
-             conditions and hand the verdict to the device. */
-          var tail = bpSdkState() === 'old'
-            ? '本机 SDK ' + parseInt(state.sdk, 10) + '，低于要求的 34。'
-            : (bpSdkState() === 'unknown'
-                ? '本机读不到版本号（ro.build.version.sdk）。'
-                : '本机版本满足，但方言不明。');
-          hint.textContent = '探测不到本机方言：' + tail +
-            'BIT_PERFECT 需要 AIDL 方言 + Android 14+（SDK 34+），应用时由设备端判定，任一不满足会被拒绝（不改动任何文件，其余档位照常）。';
-        }
-        hint.hidden = false;
-      } else {
-        hint.hidden = true;
-      }
-    }
-  }
+  /* v1.9.2 stable line: BIT_PERFECT is not part of this build.  renderBp is
+     kept as a no-op so the shared call sites need no per-line divergence. */
+  function renderBp() {}
 
   /* self test: everything we need to diagnose a failure remotely */
   function renderDiag() {
@@ -495,11 +444,6 @@
     state.spk = s.spk_rate || 'auto';
     state.spkBits = Number(s.spk_bits) || 16;
     state.spkDsp = Number(s.spk_dsp_bits) || 16;
-    state.bp = Number(s.bit_perfect) || 0;
-    state.dialect = s.dialect || '';
-    /* `hifi json` sends sdk as a STRING ("" when getprop had nothing to say);
-       keep it verbatim -- bpSdkState() is the only place that interprets it. */
-    state.sdk = (s.sdk === undefined || s.sdk === null) ? '' : String(s.sdk);
     state.restart = !(s.restart === 0 || s.restart === false);
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
@@ -719,7 +663,6 @@
       .then(function () { return hifi('set spk ' + state.spk); })
       .then(function () { return hifi('set spkbits ' + state.spkBits); })
       .then(function () { return hifi('set spkdsp ' + state.spkDsp); })
-      .then(function () { return hifi('set bitperfect ' + (state.bp ? 1 : 0)); })
       .then(function () { return hifi('set restart ' + (state.restart ? 1 : 0)); })
       .then(function () { return hifi('set enabled 1'); })
       .then(function () { return hifi('apply'); })
@@ -876,7 +819,6 @@
     else if (host.id === 'pillBits') { state.bits = Number(el.dataset.b); renderBits(); return; }
     else if (host.id === 'pillSpk') { state.spk = el.dataset.v === 'auto' ? 'auto' : Number(el.dataset.v); renderSpk(); return; }
     else if (host.id === 'pillSpkBits') { state.spkBits = Number(el.dataset.b); renderSpkBits(); return; }
-    else if (host.id === 'pillBp') { state.bp = Number(el.dataset.bp); renderBp(); return; }
     else if (host.id === 'pillSpkDsp') { state.spkDsp = Number(el.dataset.d); renderSpkDsp(); return; }
     else return;
     renderPills();

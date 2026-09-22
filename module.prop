@@ -1,6 +1,6 @@
 id=hifi_src_bypass
 name=HiFi SRC Bypass · 全机型 USB 直通
-version=2.0.0
-versionCode=200
+version=1.9.2
+versionCode=192
 author=立子
-description=全机型通用 · 音频 SRC 绕过：自动定位本机原厂音频策略文件（Qualcomm AIDL / AOSP HIDL / MIUI / MediaTek 皆可），解除 USB 小尾巴与有线耳机的直通上限、补齐 16/24/32bit 位深（可切档），可选把全局混音采样率对齐曲库以消除 AudioFlinger 重采样(SRC)。两层上限一起解：① 策略 XML（框架层）② USB HAL 库 libalsautils{,v2}.so 自带的采样率表（硬件层，多数 ROM 卡在 96k 的真凶），按 52 字节等长原位重排，绝不动文件长度与重定位。无需机型模板：文件在设备上按规则改写，且只有结构校验确认「端口与路由逐字节未变」、HAL 表原位读回一致后才挂载，否则保持原厂。档位 96k/192k/384k/44.1k 对齐，位深 16/24/32bit 可切，一键还原、卸载自动清理，内置 `hifi doctor` 四层证据校验 + WebUI 页内一键校验。v2.0 新增：BIT_PERFECT 输出通道（`hifi set bp 1`，需 Android 14+ (SDK 34+) 与 AIDL 方言**双条件**——HIDL 老机型 / 移植 ROM 即使版本新也会被拒绝，取不到版本号一并拒绝；拒绝时不写文件、不挂载、不会卡开机，其余档位照常；播放器经 preferred mixer attributes 请求即得无混音无 SRC 的直通线程）；扬声器 DSP 位宽强制（`hifi set spkdsp 24`）；开机安全网（超时自保/audioserver 熔断/首启 prepare-only，冲突自动退场不再卡屏）。systemless 绑定挂载，原厂文件从不被改写。
+description=全机型通用 · 音频 SRC 绕过：自动定位本机原厂音频策略文件（Qualcomm AIDL / AOSP HIDL / MIUI / MediaTek 皆可），解除 USB 小尾巴与有线耳机的直通上限、补齐 16/24/32bit 位深（可切档），可选把全局混音采样率对齐曲库以消除 AudioFlinger 重采样(SRC)。两层上限一起解：① 策略 XML（框架层）② USB HAL 库 libalsautils{,v2}.so 自带的采样率表（硬件层，多数 ROM 卡在 96k 的真凶），按 52 字节等长原位重排，绝不动文件长度与重定位。无需机型模板：文件在设备上按规则改写，且只有结构校验确认「端口与路由逐字节未变」、HAL 表原位读回一致后才挂载，否则保持原厂。档位 96k/192k/384k/44.1k 对齐，位深 16/24/32bit 可切，一键还原、卸载自动清理，内置 `hifi doctor` 四层证据校验 + WebUI 页内一键校验。v1.9.2 稳定线新增：拒绝时不写文件、不挂载、不会卡开机，其余档位照常；播放器经 preferred mixer attributes 请求即得无混音无 SRC 的直通线程）；扬声器 DSP 位宽强制（`hifi set spkdsp 24`）；开机安全网（超时自保/audioserver 熔断/首启 prepare-only，冲突自动退场不再卡屏）。systemless 绑定挂载，原厂文件从不被改写。

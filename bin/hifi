@@ -129,7 +129,7 @@ ALL_BITS="16 24 32"
 ALL_SPK="auto 44100 48000 96000 192000 384000"
 ALL_SPK_BITS="16 24 32"
 ALL_SPKDSP="16 24 32"
-ALL_BP="0 1"
+ALL_BP="0"  # v1.9.2 stable line: BIT_PERFECT is not part of this build
 
 # ------------------------------------------------------------------ candidates
 # Canonical locations, in the order the vendors actually use them.  Every one
