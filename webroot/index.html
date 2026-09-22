@@ -225,6 +225,8 @@
     <p class="hint">点预设切换背景；长按无效，点「编辑」改名或自定义。自定义槽：先选图 → 裁切 → 保存。</p>
     <div class="field" id="bgEditor" hidden>
       <label>裁切与缩放</label>
+      <p class="hint">框内即最终背景效果：单指拖动 / 双指缩放图片，框外变暗的部分不会被保存。</p>
+      <div class="pills" id="bgRatio"></div>
       <canvas id="bgCanvas" style="width:100%;touch-action:none;"></canvas>
       <div class="pills">
         <input id="bgName" class="bg-name" type="text" maxlength="24" placeholder="当前槽名">
@@ -233,10 +235,10 @@
       <div class="pills">
         <input type="file" id="bgFile" accept="image/*" hidden>
         <button class="pill" id="btnBgPick">选图<em>从手机相册选</em></button>
-        <button class="pill" id="btnBgSave">保存到槽<em>写入当前槽位</em></button>
+        <button class="pill" id="btnBgSave">保存此区域<em>只导出框内像素</em></button>
         <button class="pill" id="btnBgClear">清空槽<em>恢复内置图</em></button>
       </div>
-      <p class="hint">双指 / 滚轮缩放，单指拖动定位；无损保存（PNG，JPEG 原图保持 JPEG 高质量 0.92）；仅超存储预算时才提示缩放，缩放发生时会明确告知尺寸，重选图可避免。</p>
+      <p class="hint">双指 / 滚轮缩放，单指拖动定位；图片最小缩放到恰好铺满裁切框，不会出现空洞；无损保存（PNG，JPEG 原图保持 JPEG 高质量 0.92）；仅超存储预算时才提示缩放，缩放发生时会明确告知尺寸，重选图可避免。</p>
     </div>
     <p class="hint" id="bgState">—</p>
   </section>

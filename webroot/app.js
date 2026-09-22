@@ -322,38 +322,91 @@
   }
 
   /* ------------------------------------------------ crop editor (canvas 2D)
-   * The image is drawn with drawImage(img, dx, dy, dw, dh).  One-finger drag
-   * moves dx/dy, wheel / two-finger pinch scales around the canvas centre
-   * (clamped 0.1..5).  What you see is what gets saved: the export covers
-   * exactly the current canvas viewport. */
-  var bgEdit = { img: null, jpeg: false, scale: 1, dx: 0, dy: 0, lastX: 0, lastY: 0, pinch: 0 };
+   * Album-style WYSIWYG crop: the FRAME is fixed at the chosen aspect ratio
+   * and the USER MOVES/SCALES THE IMAGE inside it.  Everything outside the
+   * frame is dimmed by a mask, and ONLY the frame's pixels get exported, so
+   * the saved image is exactly the final background.  Constraints: the image
+   * can never scale below "cover the frame" and never drag its edges inside
+   * the frame -- no holes, always covered.  Coordinates use a fixed logical
+   * resolution (canvas backing store scaled by devicePixelRatio for
+   * sharpness); the export covers exactly the frame rect. */
+  var BG_RATIOS = [
+    ['9:19.5', '9:19.5（全面屏 · 推荐）', 9 / 19.5],
+    ['9:16', '9:16（传统）', 9 / 16],
+    ['3:4', '3:4', 3 / 4],
+    ['1:1', '1:1', 1],
+    ['fit', '自适应本机', 0]                  /* 0 = measured from viewport */
+  ];
+  var BG_MAX_ZOOM = 5;
+  var bgEdit = {
+    img: null, jpeg: false, ratio: '9:19.5',
+    /* frame rect in canvas logical px; canvas logical size == frame size +
+       a small dimmed margin so the "outside" is visible */
+    fw: 0, fh: 0, fx: 0, fy: 0,
+    k: 1,                 /* image->canvas scale (image px -> logical px)  */
+    dx: 0, dy: 0,         /* image top-left in logical px                  */
+    lastX: 0, lastY: 0, pinch: 0, dpr: 1
+  };
 
+  function bgRatioValue() {
+    for (var i = 0; i < BG_RATIOS.length; i++) {
+      if (BG_RATIOS[i][0] === bgEdit.ratio) {
+        return BG_RATIOS[i][2] || (window.innerWidth / Math.max(1, window.innerHeight));
+      }
+    }
+    return 9 / 19.5;
+  }
+
+  /* (re)size the canvas: the FRAME fills the width at the chosen ratio, with
+     a slim dimmed margin around it.  Backing store is scaled by dpr. */
   function bgCanvasSize() {
     var c = $('bgCanvas');
-    var w = c.parentNode.clientWidth || c.clientWidth || 320;
-    return { w: Math.max(120, Math.round(w)), h: Math.max(120, Math.round(w * 0.62)) };
+    var cw = (c.parentNode.clientWidth || c.clientWidth || 320) - 2;
+    var m = Math.max(6, Math.round(cw * 0.03));       /* dimmed margin */
+    var fw = Math.max(120, cw - m * 2);
+    var fh = Math.max(120, Math.round(fw / bgRatioValue()));
+    var dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    c.style.height = (fh + m * 2) + 'px';
+    c.width = Math.round((fw + m * 2) * dpr);
+    c.height = Math.round((fh + m * 2) * dpr);
+    bgEdit.fw = fw; bgEdit.fh = fh; bgEdit.fx = m; bgEdit.fy = m;
+    bgEdit.dpr = dpr;
+    return { w: fw + m * 2, h: fh + m * 2 };
+  }
+
+  /* smallest k that still covers the frame */
+  function bgMinScale() {
+    var img = bgEdit.img;
+    if (!img) return 0.01;
+    return Math.max(bgEdit.fw / img.width, bgEdit.fh / img.height);
+  }
+
+  /* clamp k to [cover, 5x cover] and dx/dy so the image always covers
+     the frame (no hole anywhere inside the frame) */
+  function bgClamp() {
+    var kmin = bgMinScale();
+    bgEdit.k = Math.min(kmin * BG_MAX_ZOOM, Math.max(kmin, bgEdit.k));
+    bgEdit.dx = Math.min(bgEdit.fx + bgEdit.fw - bgEdit.img.width * bgEdit.k,
+                         Math.max(bgEdit.fx, bgEdit.dx));
+    bgEdit.dy = Math.min(bgEdit.fy + bgEdit.fh - bgEdit.img.height * bgEdit.k,
+                         Math.max(bgEdit.fy, bgEdit.dy));
   }
 
   function bgCanvasOpen(file) {
-    var c = $('bgCanvas');
-    var ctx = c.getContext('2d');
     var reader = new FileReader();
     reader.onload = function () {
       var img = new Image();
       img.onload = function () {
-        var sz = bgCanvasSize();
-        c.width = sz.w; c.height = sz.h;
+        bgCanvasSize();
         bgEdit.img = img;
         bgEdit.jpeg = /image\/jpe?g/i.test(String(file.type || ''));
-        /* initial contain fit, centred */
-        var k = Math.min(sz.w / img.width, sz.h / img.height);
-        bgEdit.scale = 1;                      /* user scale, on top of fit */
-        bgEdit.fit = k;
-        bgEdit.dx = (sz.w - img.width * k) / 2;
-        bgEdit.dy = (sz.h - img.height * k) / 2;
+        /* initial: cover the frame, centred */
+        bgEdit.k = bgMinScale();
+        bgEdit.dx = bgEdit.fx + (bgEdit.fw - img.width * bgEdit.k) / 2;
+        bgEdit.dy = bgEdit.fy + (bgEdit.fh - img.height * bgEdit.k) / 2;
         bgCanvasDraw();
         $('bgEditor').hidden = false;
-        bgMsg('已载入 ' + img.width + '×' + img.height + '，拖动 / 双指缩放调整，点「保存到槽」。');
+        bgMsg('已载入 ' + img.width + '×' + img.height + '；框内即保存后的背景，拖动 / 双指调整，点「保存此区域」。');
       };
       img.onerror = function () { bgMsg('图片读取失败，请换一张试试。'); };
       img.src = reader.result;
@@ -364,41 +417,101 @@
   function bgCanvasDraw() {
     var c = $('bgCanvas');
     var ctx = c.getContext('2d');
-    ctx.clearRect(0, 0, c.width, c.height);
+    var d = bgEdit.dpr || 1;
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+    ctx.clearRect(0, 0, c.width / d, c.height / d);
     if (!bgEdit.img) return;
-    var k = bgEdit.fit * bgEdit.scale;
-    var w = bgEdit.img.width * k, h = bgEdit.img.height * k;
-    ctx.drawImage(bgEdit.img, bgEdit.dx, bgEdit.dy, w, h);
+    bgClamp();
+    var lw = c.width / d, lh = c.height / d;
+    /* dimmed backdrop, then the image, then a darker mask with the frame
+       cut out -- the frame interior shows the untouched picture (WYSIWYG) */
+    ctx.fillStyle = 'rgba(0,0,0,.45)';
+    ctx.fillRect(0, 0, lw, lh);
+    ctx.drawImage(bgEdit.img, bgEdit.dx, bgEdit.dy,
+                  bgEdit.img.width * bgEdit.k, bgEdit.img.height * bgEdit.k);
+    ctx.fillStyle = 'rgba(0,0,0,.5)';
+    ctx.fillRect(0, 0, lw, bgEdit.fy);
+    ctx.fillRect(0, bgEdit.fy + bgEdit.fh, lw, lh - bgEdit.fy - bgEdit.fh);
+    ctx.fillRect(0, bgEdit.fy, bgEdit.fx, bgEdit.fh);
+    ctx.fillRect(bgEdit.fx + bgEdit.fw, bgEdit.fy, lw - bgEdit.fx - bgEdit.fw, bgEdit.fh);
+    /* frame border so the crop area is unmistakable */
+    ctx.strokeStyle = 'rgba(255,255,255,.9)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bgEdit.fx + 1, bgEdit.fy + 1, bgEdit.fw - 2, bgEdit.fh - 2);
   }
 
-  function bgScaleAt(factor) {
-    var s0 = bgEdit.scale;
-    bgEdit.scale = Math.min(5, Math.max(0.1, s0 * factor));
-    if (bgEdit.scale === s0) return;
-    /* keep the canvas centre point anchored while zooming */
-    var c = $('bgCanvas');
-    var cx = c.width / 2, cy = c.height / 2;
-    var k0 = bgEdit.fit * s0, k1 = bgEdit.fit * bgEdit.scale;
-    bgEdit.dx = cx - (cx - bgEdit.dx) * (k1 / k0);
-    bgEdit.dy = cy - (cy - bgEdit.dy) * (k1 / k0);
+  /* zoom keeping the point (px,py) -- in logical px -- visually fixed */
+  function bgScaleAt(factor, px, py) {
+    if (!bgEdit.img) return;
+    var k0 = bgEdit.k;
+    var kmin = bgMinScale();
+    var k1 = Math.min(kmin * BG_MAX_ZOOM, Math.max(kmin, k0 * factor));
+    if (k1 === k0) return;
+    px = (px === undefined) ? bgEdit.fx + bgEdit.fw / 2 : px;
+    py = (py === undefined) ? bgEdit.fy + bgEdit.fh / 2 : py;
+    bgEdit.dx = px - (px - bgEdit.dx) * (k1 / k0);
+    bgEdit.dy = py - (py - bgEdit.dy) * (k1 / k0);
+    bgEdit.k = k1;
+    bgClamp();
     bgCanvasDraw();
   }
 
-  /* export the current canvas viewport.  Returns a dataURL, honouring the
-     source format: PNG by default (lossless), JPEG only if the user picked a
-     JPEG source (re-encoded once at the highest quality we ship). */
-  function bgExport() {
-    var c = $('bgCanvas');
-    return bgEdit.jpeg ? c.toDataURL('image/jpeg', BG_JPEG_QUALITY) : c.toDataURL('image/png');
+  /* switch the frame ratio: resize, re-cover and redraw.  The pill host is
+     re-rendered deferred -- this click is still bubbling to the document
+     delegate which reads el.parentNode (same trap as pillBg). */
+  function bgSetRatio(key) {
+    bgEdit.ratio = key;
+    setTimeout(bgRenderRatio, 0);
+    if (bgEdit.img) {
+      bgCanvasSize();
+      bgEdit.k = bgMinScale();
+      bgEdit.dx = bgEdit.fx + (bgEdit.fw - bgEdit.img.width * bgEdit.k) / 2;
+      bgEdit.dy = bgEdit.fy + (bgEdit.fh - bgEdit.img.height * bgEdit.k) / 2;
+      bgCanvasDraw();
+    }
   }
 
-  /* fit the current drawing into a canvas of w*h (downscale once, lossless
-     canvas resample) -- only used as the LAST resort over budget */
+  function bgRenderRatio() {
+    var host = $('bgRatio');
+    if (!host) return;
+    host.innerHTML = '';
+    BG_RATIOS.forEach(function (r) {
+      var el = document.createElement('button');
+      el.className = 'pill' + (bgEdit.ratio === r[0] ? ' sel' : '');
+      el.textContent = r[1];
+      el.dataset.ratio = r[0];
+      host.appendChild(el);
+    });
+  }
+
+  /* export ONLY the frame rect at full backing-store resolution: draw the
+     image, offset by -frame, into a fresh canvas -- the mask never enters
+     the export.  PNG lossless by default, JPEG kept for jpeg sources. */
+  function bgExport() {
+    var img = bgEdit.img;
+    var d = bgEdit.dpr || 1;
+    var off = document.createElement('canvas');
+    off.width = Math.round(bgEdit.fw * d);
+    off.height = Math.round(bgEdit.fh * d);
+    var octx = off.getContext('2d');
+    octx.scale(d, d);
+    octx.drawImage(img, bgEdit.dx - bgEdit.fx, bgEdit.dy - bgEdit.fy,
+                   img.width * bgEdit.k, img.height * bgEdit.k);
+    return bgEdit.jpeg ? off.toDataURL('image/jpeg', BG_JPEG_QUALITY)
+                       : off.toDataURL('image/png');
+  }
+
+  /* fit the frame export into w*h (single lossless resample) -- last resort
+     over budget; the frame ratio is preserved */
   function bgExportScaled(w, h) {
-    var src = $('bgCanvas');
+    var img = bgEdit.img;
+    var d = bgEdit.dpr || 1;
     var off = document.createElement('canvas');
     off.width = w; off.height = h;
-    off.getContext('2d').drawImage(src, 0, 0, w, h);
+    off.getContext('2d').drawImage(img, (bgEdit.dx - bgEdit.fx) * (w / (bgEdit.fw * d)),
+                                   (bgEdit.dy - bgEdit.fy) * (h / (bgEdit.fh * d)),
+                                   img.width * bgEdit.k * (w / (bgEdit.fw * d)),
+                                   img.height * bgEdit.k * (h / (bgEdit.fh * d)));
     return bgEdit.jpeg ? off.toDataURL('image/jpeg', BG_JPEG_QUALITY)
                        : off.toDataURL('image/png');
   }
@@ -412,15 +525,17 @@
     var over = data.length - BG_BUDGET;
     if (over > 0) {
       /* 1st retry: PNG lossless (only relevant for jpeg sources).  2nd and
-         last resort: ONE downscale -- and we say so, with the exact size. */
+         last resort: ONE downscale of the frame export -- and we say so,
+         with the exact size.  The frame ratio is never changed. */
       if (bgEdit.jpeg) {
-        var c = $('bgCanvas');
-        data = c.toDataURL('image/png');
+        var d = bgEdit.dpr || 1;
+        data = bgExportScaled(Math.round(bgEdit.fw * d), Math.round(bgEdit.fh * d));
       }
       if (data.length > BG_BUDGET) {
+        var d2 = bgEdit.dpr || 1;
         var k = Math.sqrt(BG_BUDGET / data.length) * 0.98;
-        var w = Math.max(1, Math.round(c.width * k));
-        var h = Math.max(1, Math.round(c.height * k));
+        var w = Math.max(1, Math.round(bgEdit.fw * d2 * k));
+        var h = Math.max(1, Math.round(bgEdit.fh * d2 * k));
         data = bgExportScaled(w, h);
         if (data.length > BG_BUDGET) {
           bgMsg('保存被拒：这张图导出后约 ' + bgKb(data.length) + 'KB，超过单张 2.5MB 预算 ' +
@@ -511,10 +626,10 @@
         var ed = $('bgEditor');
         ed.hidden = !ed.hidden;
         if (!ed.hidden) {
-          var sz = bgCanvasSize();
+          bgRenderRatio();
           var c = $('bgCanvas');
-          if (!bgEdit.img) { c.width = sz.w; c.height = sz.h; }
-          bgCanvasDraw();
+          if (!bgEdit.img) { bgCanvasSize(); bgCanvasDraw(); }
+          else { bgCanvasSize(); bgCanvasDraw(); }
         }
         bgRenderSoon();
         return;
@@ -556,36 +671,75 @@
     });
 
     var c = $('bgCanvas');
-    /* one-finger drag / two-finger pinch */
+    /* ratio pills live in the editor; a click re-frames the crop */
+    var rhost = $('bgRatio');
+    if (rhost) {
+      rhost.addEventListener('click', function (ev) {
+        var el = ev.target.closest ? ev.target.closest('.pill') : null;
+        if (!el || !el.dataset.ratio) return;
+        bgSetRatio(el.dataset.ratio);
+      });
+    }
+    /* album-style gestures inside the fixed frame.  Pointer coords are
+       converted to canvas logical px (client -> rect -> minus margin,
+       backing store is dpr-scaled but drawing is in logical px). */
+    function bgPt(e) {
+      var r = c.getBoundingClientRect();
+      return {
+        x: (e.clientX - r.left) * (c.width / (r.width * (bgEdit.dpr || 1))) - 0,
+        y: (e.clientY - r.top) * (c.height / (r.height * (bgEdit.dpr || 1))) - 0
+      };
+    }
+    /* one-finger drag / two-finger pinch (anchored at the pinch centre) */
     c.addEventListener('touchstart', function (e) {
       if (e.touches.length === 1) {
-        bgEdit.lastX = e.touches[0].clientX; bgEdit.lastY = e.touches[0].clientY;
+        var p = bgPt(e.touches[0]);
+        bgEdit.lastX = p.x; bgEdit.lastY = p.y;
       } else if (e.touches.length === 2) {
-        bgEdit.pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                                  e.touches[0].clientY - e.touches[1].clientY);
+        var p0 = bgPt(e.touches[0]), p1 = bgPt(e.touches[1]);
+        bgEdit.pinch = Math.hypot(p0.x - p1.x, p0.y - p1.y);
+        bgEdit.pinchX = (p0.x + p1.x) / 2; bgEdit.pinchY = (p0.y + p1.y) / 2;
       }
       e.preventDefault();
     }, { passive: false });
     c.addEventListener('touchmove', function (e) {
       if (e.touches.length === 1 && bgEdit.img) {
-        var t = e.touches[0];
-        bgEdit.dx += t.clientX - bgEdit.lastX;
-        bgEdit.dy += t.clientY - bgEdit.lastY;
-        bgEdit.lastX = t.clientX; bgEdit.lastY = t.clientY;
+        var p = bgPt(e.touches[0]);
+        bgEdit.dx += p.x - bgEdit.lastX;
+        bgEdit.dy += p.y - bgEdit.lastY;
+        bgEdit.lastX = p.x; bgEdit.lastY = p.y;
         bgCanvasDraw();
       } else if (e.touches.length === 2 && bgEdit.pinch > 0 && bgEdit.img) {
-        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                           e.touches[0].clientY - e.touches[1].clientY);
-        bgScaleAt(d / bgEdit.pinch);
+        var p0 = bgPt(e.touches[0]), p1 = bgPt(e.touches[1]);
+        var d = Math.hypot(p0.x - p1.x, p0.y - p1.y);
+        bgScaleAt(d / bgEdit.pinch, bgEdit.pinchX, bgEdit.pinchY);
         bgEdit.pinch = d;
+        bgEdit.pinchX = (p0.x + p1.x) / 2; bgEdit.pinchY = (p0.y + p1.y) / 2;
       }
       e.preventDefault();
     }, { passive: false });
     c.addEventListener('touchend', function () { bgEdit.pinch = 0; });
+    /* mouse: drag with the button held, wheel zooms at the cursor */
+    c.addEventListener('mousedown', function (e) {
+      var p = bgPt(e);
+      bgEdit.lastX = p.x; bgEdit.lastY = p.y;
+      bgEdit.drag = true;
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', function (e) {
+      if (!bgEdit.drag || !bgEdit.img) return;
+      var p = bgPt(e);
+      bgEdit.dx += p.x - bgEdit.lastX;
+      bgEdit.dy += p.y - bgEdit.lastY;
+      bgEdit.lastX = p.x; bgEdit.lastY = p.y;
+      bgCanvasDraw();
+    });
+    window.addEventListener('mouseup', function () { bgEdit.drag = false; });
     c.addEventListener('wheel', function (e) {
       if (!bgEdit.img) return;
       e.preventDefault();
-      bgScaleAt(e.deltaY < 0 ? 1.1 : 1 / 1.1);
+      var p = bgPt(e);
+      bgScaleAt(e.deltaY < 0 ? 1.1 : 1 / 1.1, p.x, p.y);
     }, { passive: false });
   }
 
