@@ -186,3 +186,42 @@ html, body { overflow-x: hidden; }
   transition: opacity .2s, transform .2s; z-index: 99; max-width: 86vw; text-align: center;
 }
 .toast.show { opacity: .96; transform: translateX(-50%) translateY(0); }
+
+/* ---- background image layer ------------------------------------------- *
+ * Fixed layer behind everything: does not scroll with the page.  When a
+ * background is active (body.has-bg) the card / pill / stat PANEL BACKGROUNDS
+ * go translucent at the user-chosen --fg-alpha percent (default 50, slider
+ * in the bg card); text keeps full opacity for readability.  With the
+ * background off --fg-alpha is pinned to 100 by app.js, i.e. factory look. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1;
+  background-image: var(--bg-img, none);
+  background-size: cover; background-position: center;
+}
+body.has-bg .card,
+body.has-bg .banner,
+body.has-bg .stat {
+  background: color-mix(in srgb, var(--panel) calc(var(--fg-alpha, 50) * 1%), transparent);
+}
+body.has-bg .pill,
+body.has-bg .badge,
+body.has-bg .log,
+body.has-bg .bg-name {
+  background: color-mix(in srgb, var(--panel-2) calc(var(--fg-alpha, 50) * 1%), transparent);
+}
+body.has-bg .btn.ghost {
+  background: color-mix(in srgb, var(--panel-2) calc(var(--fg-alpha, 50) * 1%), transparent);
+}
+
+/* panel opacity slider in the bg card */
+input[type="range"]#bgOpacity {
+  width: 100%; margin: 6px 0 2px; accent-color: var(--accent); cursor: pointer;
+}
+
+/* custom-slot name input inside the bg editor */
+.bg-name {
+  flex: 1 1 140px; min-width: 0; font-family: inherit; font-size: 14px;
+  color: var(--fg); background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 11px; padding: 10px 12px;
+}
+.bg-name:focus { outline: none; border-color: var(--accent); }

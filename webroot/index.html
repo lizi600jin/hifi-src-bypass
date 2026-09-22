@@ -211,6 +211,36 @@
     <button id="btnReset" class="btn solid-danger">一键还原</button>
   </section>
 
+  <section class="card" id="bgCard">
+    <div class="card-head">
+      <h2>背景图</h2>
+      <button id="btnBgOff" class="btn small ghost">关闭背景</button>
+    </div>
+    <div class="pills" id="pillBg"></div>
+    <div class="field">
+      <label>面板不透明度 <span id="bgOpacityVal">50%</span></label>
+      <input type="range" id="bgOpacity" min="0" max="100" step="5" value="50">
+      <p class="hint">背景开启时，卡片与档位面板底色的不透明度：0%＝面板全透明（背景最透出），100%＝面板完全不透明。文字始终保持不透明以保证可读。</p>
+    </div>
+    <p class="hint">点预设切换背景；长按无效，点「编辑」改名或自定义。自定义槽：先选图 → 裁切 → 保存。</p>
+    <div class="field" id="bgEditor" hidden>
+      <label>裁切与缩放</label>
+      <canvas id="bgCanvas" style="width:100%;touch-action:none;"></canvas>
+      <div class="pills">
+        <input id="bgName" class="bg-name" type="text" maxlength="24" placeholder="当前槽名">
+        <button class="pill" id="btnBgRename">重命名<em>命名当前选中槽</em></button>
+      </div>
+      <div class="pills">
+        <input type="file" id="bgFile" accept="image/*" hidden>
+        <button class="pill" id="btnBgPick">选图<em>从手机相册选</em></button>
+        <button class="pill" id="btnBgSave">保存到槽<em>写入当前槽位</em></button>
+        <button class="pill" id="btnBgClear">清空槽<em>恢复内置图</em></button>
+      </div>
+      <p class="hint">双指 / 滚轮缩放，单指拖动定位；无损保存（PNG，JPEG 原图保持 JPEG 高质量 0.92）；仅超存储预算时才提示缩放，缩放发生时会明确告知尺寸，重选图可避免。</p>
+    </div>
+    <p class="hint" id="bgState">—</p>
+  </section>
+
   <section class="card danger-zone">
     <div class="card-head">
       <h2>一键还原</h2>

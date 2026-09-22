@@ -135,8 +135,454 @@
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
-    last: null             /* last raw result, for the self test             */
+    last: null,            /* last raw result, for the self test             */
+    bg: { slots: [], active: 0, opacity: 1 }
   };
+
+  /* ------------------------------------------------- background image system
+   * Six slots: three builtin presets (webroot/bg/bgN.jpg, shipped assets) and
+   * three user slots whose dataURL bodies live in localStorage keys
+   * hifi.bg.uc1..3 (one key per slot, each under the per-key quota).  Slot
+   * metadata (names, active slot, opacity) lives in hifi.bg.meta.  active:-1
+   * means the background is off.  opacity is the FOREGROUND PANEL opacity in
+   * percent (0..100, default 50): it drives --fg-alpha, so with a background
+   * active the cards/pills go translucent while text stays opaque.  Quality
+   * policy: NO downsampling and no lossy transcoding by default -- the crop
+   * is exported exactly as drawn (PNG lossless, or the original JPEG format
+   * at quality 0.92); only when the export exceeds the storage budget do we
+   * (1) retry as PNG, then (2) downscale once, and the user is told about
+   * any scaling. */
+  var BG_BUILTIN = [
+    { key: 'bg1', name: '誓死效忠水月吉米' },
+    { key: 'bg2', name: '誓死效忠水月雨' },
+    { key: 'bg3', name: '誓死效忠天使吉米' }
+  ];
+  var BG_CUSTOM = ['uc1', 'uc2', 'uc3'];
+  var BG_META_KEY = 'hifi.bg.meta';
+  var BG_BUDGET = 2.5 * 1024 * 1024;   /* max dataURL chars per custom slot */
+  var BG_JPEG_QUALITY = 0.92;
+
+  function bgStore() {
+    try { return window.localStorage; } catch (e) { return null; }
+  }
+
+  function bgLoadMeta() {
+    var st = bgStore();
+    if (!st) return null;
+    try {
+      var v = JSON.parse(st.getItem(BG_META_KEY) || 'null');
+      return (v && typeof v === 'object') ? v : null;
+    } catch (e) { return null; }
+  }
+
+  function bgSaveMeta() {
+    var st = bgStore();
+    if (!st) return;
+    var names = {};
+    state.bg.slots.forEach(function (s) { names[s.key] = s.name; });
+    try {
+      st.setItem(BG_META_KEY, JSON.stringify({
+        active: state.bg.active, opacity: state.bg.opacity, names: names
+      }));
+    } catch (e) { /* quota hit on a tiny key: nothing sensible to do */ }
+  }
+
+  function bgLoadCustom(key) {
+    var st = bgStore();
+    if (!st) return null;
+    try { return st.getItem('hifi.bg.' + key) || null; } catch (e) { return null; }
+  }
+
+  function bgSlotUrl(slot) {
+    if (state.bg.active < 0) return null;
+    var s = state.bg.slots[state.bg.active];
+    if (!s) return null;
+    return s.custom ? bgLoadCustom(s.key) : ('bg/' + s.key + '.jpg');
+  }
+
+  /* apply the current slot to the body css variables (fixed ::before layer).
+     When the background is on, --fg-alpha carries the panel opacity percent
+     from the slider (cards mix var(--panel) at that % over the image); off
+     means full opacity, but the slider value itself is kept in meta. */
+  function bgApply() {
+    var b = document.body;
+    if (!b) return;
+    var url = bgSlotUrl();
+    if (!url) {
+      b.style.setProperty('--bg-img', 'none');
+      b.style.setProperty('--fg-alpha', '100');
+      b.classList.remove('has-bg');
+    } else {
+      b.style.setProperty('--bg-img', 'url("' + url + '")');
+      b.classList.add('has-bg');
+      b.style.setProperty('--fg-alpha', String(state.bg.opacity));
+    }
+  }
+
+  function bgInit() {
+    state.bg.slots = [];
+    BG_BUILTIN.forEach(function (b) {
+      state.bg.slots.push({ name: b.name, custom: false, key: b.key });
+    });
+    BG_CUSTOM.forEach(function (k) {
+      state.bg.slots.push({ name: '', custom: true, key: k });
+    });
+    var meta = bgLoadMeta();
+    if (meta) {
+      state.bg.active = Number(meta.active) | 0;
+      if (state.bg.active < -1 || state.bg.active >= state.bg.slots.length) state.bg.active = 0;
+      /* opacity is the PANEL percent 0..100 (default 50).  Older drafts of
+         this feature stored a background opacity 0..1 -- map 0/1 to 100 so
+         those users do not end up with an invisible panel. */
+      var op = Number(meta.opacity);
+      if (isNaN(op)) op = 50;
+      if (op === 0 || op === 1) op = 100;
+      state.bg.opacity = Math.min(100, Math.max(0, Math.round(op)));
+      var names = meta.names || {};
+      state.bg.slots.forEach(function (s) {
+        if (typeof names[s.key] === 'string' && names[s.key]) s.name = names[s.key];
+      });
+    } else {
+      state.bg.active = 0;
+      state.bg.opacity = 50;
+    }
+    bgApply();
+    bgRender();
+  }
+
+  function bgRender() {
+    var host = $('pillBg');
+    if (!host) return;
+    host.innerHTML = '';
+    var st = bgStore();
+    state.bg.slots.forEach(function (s, i) {
+      var el = document.createElement('button');
+      var has = s.custom ? !!bgLoadCustom(s.key) : true;
+      var label = s.custom ? (has ? (s.name || ('自定义 ' + (i - 2))) : '空槽 ' + (i - 2)) : s.name;
+      el.className = 'pill' + (state.bg.active === i ? ' sel' : '');
+      el.textContent = label;
+      var em = document.createElement('em');
+      em.textContent = s.custom
+        ? (has ? ('自定义 · ' + Math.round(bgLoadCustom(s.key).length / 1024) + 'KB') : '点编辑上传')
+        : '内置预设';
+      el.appendChild(em);
+      el.dataset.slot = String(i);
+      host.appendChild(el);
+    });
+    var ed = document.createElement('button');
+    ed.className = 'pill';
+    ed.textContent = '编辑';
+    var edm = document.createElement('em');
+    edm.textContent = '命名 / 上传 / 裁切';
+    ed.appendChild(edm);
+    ed.dataset.slot = 'edit';
+    host.appendChild(ed);
+    var cur = state.bg.active >= 0 ? state.bg.slots[state.bg.active] : null;
+    var line = $('bgState');
+    if (line) {
+      if (!cur) {
+        line.textContent = '背景已关闭；点任意预设重新开启。';
+      } else if (!cur.custom) {
+        line.textContent = '当前：「' + cur.name + '」（内置）；点「编辑」可重命名。';
+      } else {
+        var has = bgLoadCustom(cur.key);
+        line.textContent = has
+          ? '当前：「' + (cur.name || cur.key) + '」（自定义 · ' + Math.round(has.length / 1024) + 'KB）'
+          : '当前：空槽 ' + cur.key + '；选一张图保存即可使用。';
+      }
+    }
+    /* keep the editor name input in sync with the selected slot */
+    var inp = $('bgName');
+    if (inp && cur) inp.value = cur.name;
+    var ov = $('bgOpacityVal');
+    if (ov) ov.textContent = state.bg.opacity + '%';
+    var os = $('bgOpacity');
+    if (os) os.value = String(state.bg.opacity);
+    if (st === null && line) {
+      line.textContent += '（当前环境无 localStorage，背景设置不会被记住）';
+    }
+  }
+
+  /* like bgRender, but deferred: the pill host is re-rendered from inside a
+     click on one of its own pills.  The document-level pill delegate runs
+     LATER in the same bubble and reads el.parentNode -- replacing the host
+     children synchronously detaches that pill and makes the delegate throw. */
+  function bgRenderSoon() { setTimeout(bgRender, 0); }
+
+  function bgSelect(i) {
+    state.bg.active = i;
+    bgApply();
+    bgSaveMeta();
+    bgRenderSoon();
+  }
+
+  /* ------------------------------------------------ crop editor (canvas 2D)
+   * The image is drawn with drawImage(img, dx, dy, dw, dh).  One-finger drag
+   * moves dx/dy, wheel / two-finger pinch scales around the canvas centre
+   * (clamped 0.1..5).  What you see is what gets saved: the export covers
+   * exactly the current canvas viewport. */
+  var bgEdit = { img: null, jpeg: false, scale: 1, dx: 0, dy: 0, lastX: 0, lastY: 0, pinch: 0 };
+
+  function bgCanvasSize() {
+    var c = $('bgCanvas');
+    var w = c.parentNode.clientWidth || c.clientWidth || 320;
+    return { w: Math.max(120, Math.round(w)), h: Math.max(120, Math.round(w * 0.62)) };
+  }
+
+  function bgCanvasOpen(file) {
+    var c = $('bgCanvas');
+    var ctx = c.getContext('2d');
+    var reader = new FileReader();
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var sz = bgCanvasSize();
+        c.width = sz.w; c.height = sz.h;
+        bgEdit.img = img;
+        bgEdit.jpeg = /image\/jpe?g/i.test(String(file.type || ''));
+        /* initial contain fit, centred */
+        var k = Math.min(sz.w / img.width, sz.h / img.height);
+        bgEdit.scale = 1;                      /* user scale, on top of fit */
+        bgEdit.fit = k;
+        bgEdit.dx = (sz.w - img.width * k) / 2;
+        bgEdit.dy = (sz.h - img.height * k) / 2;
+        bgCanvasDraw();
+        $('bgEditor').hidden = false;
+        bgMsg('已载入 ' + img.width + '×' + img.height + '，拖动 / 双指缩放调整，点「保存到槽」。');
+      };
+      img.onerror = function () { bgMsg('图片读取失败，请换一张试试。'); };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function bgCanvasDraw() {
+    var c = $('bgCanvas');
+    var ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (!bgEdit.img) return;
+    var k = bgEdit.fit * bgEdit.scale;
+    var w = bgEdit.img.width * k, h = bgEdit.img.height * k;
+    ctx.drawImage(bgEdit.img, bgEdit.dx, bgEdit.dy, w, h);
+  }
+
+  function bgScaleAt(factor) {
+    var s0 = bgEdit.scale;
+    bgEdit.scale = Math.min(5, Math.max(0.1, s0 * factor));
+    if (bgEdit.scale === s0) return;
+    /* keep the canvas centre point anchored while zooming */
+    var c = $('bgCanvas');
+    var cx = c.width / 2, cy = c.height / 2;
+    var k0 = bgEdit.fit * s0, k1 = bgEdit.fit * bgEdit.scale;
+    bgEdit.dx = cx - (cx - bgEdit.dx) * (k1 / k0);
+    bgEdit.dy = cy - (cy - bgEdit.dy) * (k1 / k0);
+    bgCanvasDraw();
+  }
+
+  /* export the current canvas viewport.  Returns a dataURL, honouring the
+     source format: PNG by default (lossless), JPEG only if the user picked a
+     JPEG source (re-encoded once at the highest quality we ship). */
+  function bgExport() {
+    var c = $('bgCanvas');
+    return bgEdit.jpeg ? c.toDataURL('image/jpeg', BG_JPEG_QUALITY) : c.toDataURL('image/png');
+  }
+
+  /* fit the current drawing into a canvas of w*h (downscale once, lossless
+     canvas resample) -- only used as the LAST resort over budget */
+  function bgExportScaled(w, h) {
+    var src = $('bgCanvas');
+    var off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    off.getContext('2d').drawImage(src, 0, 0, w, h);
+    return bgEdit.jpeg ? off.toDataURL('image/jpeg', BG_JPEG_QUALITY)
+                       : off.toDataURL('image/png');
+  }
+
+  function bgSave() {
+    if (!bgEdit.img) { bgMsg('先点「选图」再保存。'); return; }
+    var slotIdx = bgPickTarget();
+    if (slotIdx < 0) { bgMsg('没有可用槽位。'); return; }
+    var slot = state.bg.slots[slotIdx];
+    var data = bgExport();
+    var over = data.length - BG_BUDGET;
+    if (over > 0) {
+      /* 1st retry: PNG lossless (only relevant for jpeg sources).  2nd and
+         last resort: ONE downscale -- and we say so, with the exact size. */
+      if (bgEdit.jpeg) {
+        var c = $('bgCanvas');
+        data = c.toDataURL('image/png');
+      }
+      if (data.length > BG_BUDGET) {
+        var k = Math.sqrt(BG_BUDGET / data.length) * 0.98;
+        var w = Math.max(1, Math.round(c.width * k));
+        var h = Math.max(1, Math.round(c.height * k));
+        data = bgExportScaled(w, h);
+        if (data.length > BG_BUDGET) {
+          bgMsg('保存被拒：这张图导出后约 ' + bgKb(data.length) + 'KB，超过单张 2.5MB 预算 ' +
+                bgKb(data.length - BG_BUDGET) + 'KB，即使缩到 ' + w + '×' + h +
+                ' 也放不下。请裁小一点再保存。');
+          return;
+        }
+        bgMsg('已缩放到 ' + w + '×' + h + ' 以适配存储（缩小 ' +
+              Math.round((1 - k) * 100) + '%）——重选图裁更小可避免缩放。');
+      }
+    }
+    var st = bgStore();
+    if (!st) { bgMsg('当前环境不支持 localStorage，无法保存自定义图。'); return; }
+    /* overwrite confirm: total size across the three custom slots matters */
+    var total = 0;
+    BG_CUSTOM.forEach(function (k2) { total += (bgLoadCustom(k2) || '').length; });
+    if ((bgLoadCustom(slot.key) || '').length > 0) {
+      if (!window.confirm('槽位「' + (slot.name || slot.key) + '」已有图片（3 个自定义槽共 ' +
+          bgKb(total) + 'KB，单张上限 2.5MB）。覆盖它？')) return;
+    }
+    try {
+      st.setItem('hifi.bg.' + slot.key, data);
+    } catch (e) {
+      bgMsg('保存被拒：浏览器存储写入失败（quota）。这张图约 ' + bgKb(data.length) +
+            'KB，请裁小一点或清掉其他自定义槽再试。');
+      return;
+    }
+    if (!slot.name) slot.name = '自定义图 ' + (slotIdx - 2);
+    bgSaveMeta();
+    bgRender();
+    bgMsg('已保存到「' + slot.name + '」（' + bgKb(data.length) + 'KB）。');
+  }
+
+  function bgPickTarget() {
+    /* prefer the active slot if it is custom, else first empty, else uc1 */
+    var cur = state.bg.active >= 0 ? state.bg.slots[state.bg.active] : null;
+    if (cur && cur.custom) return state.bg.active;
+    for (var i = 3; i < 6; i++) {
+      if (!bgLoadCustom(state.bg.slots[i].key)) return i;
+    }
+    return state.bg.active >= 3 ? state.bg.active : 3;
+  }
+
+  function bgClear() {
+    var cur = state.bg.active >= 0 ? state.bg.slots[state.bg.active] : null;
+    if (!cur || !cur.custom) { bgMsg('先在预设里选中一个自定义槽（空槽 1..3）再清空。'); return; }
+    var st = bgStore();
+    if (st) {
+      try { st.removeItem('hifi.bg.' + cur.key); } catch (e) { /* ignore */ }
+    }
+    cur.name = '';
+    bgSaveMeta();
+    bgRender();
+    bgMsg('已清空槽 ' + cur.key + '。');
+  }
+
+  function bgRename() {
+    if (state.bg.active < 0) { bgMsg('先选中一个槽再重命名。'); return; }
+    var slot = state.bg.slots[state.bg.active];
+    var inp = $('bgName');
+    var name = String(inp.value || '').trim();
+    if (!name) { bgMsg('名字不能为空。'); return; }
+    slot.name = name;
+    bgSaveMeta();
+    bgRender();
+    bgMsg('已把当前槽重命名为「' + name + '」。');
+  }
+
+  function bgKb(n) { return Math.round(n / 1024); }
+
+  function bgMsg(t) {
+    var ed = $('bgEditor');
+    if (ed && !ed.hidden) {
+      var line = $('bgState');
+      if (line) line.textContent = t;
+    } else {
+      toast(t);
+    }
+  }
+
+  function bgBind() {
+    var host = $('pillBg');
+    if (!host) return;
+    host.addEventListener('click', function (ev) {
+      var el = ev.target.closest ? ev.target.closest('.pill') : null;
+      if (!el) return;
+      if (el.dataset.slot === 'edit') {
+        var ed = $('bgEditor');
+        ed.hidden = !ed.hidden;
+        if (!ed.hidden) {
+          var sz = bgCanvasSize();
+          var c = $('bgCanvas');
+          if (!bgEdit.img) { c.width = sz.w; c.height = sz.h; }
+          bgCanvasDraw();
+        }
+        bgRenderSoon();
+        return;
+      }
+      bgSelect(Number(el.dataset.slot));
+    });
+    $('btnBgOff').addEventListener('click', function () {
+      state.bg.active = -1;
+      bgApply();
+      bgSaveMeta();
+      bgRenderSoon();
+    });
+    $('btnBgPick').addEventListener('click', function () { $('bgFile').click(); });
+    $('bgFile').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      this.value = '';
+      if (f) bgCanvasOpen(f);
+    });
+    $('btnBgSave').addEventListener('click', bgSave);
+    $('btnBgClear').addEventListener('click', bgClear);
+    $('btnBgRename').addEventListener('click', bgRename);
+    $('bgName').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); bgRename(); }
+    });
+    /* panel opacity slider: applies at once and persists in the same meta key
+       (opacity = foreground panel percent, 0..100) */
+    $('bgOpacity').addEventListener('input', function () {
+      state.bg.opacity = Math.min(100, Math.max(0, Math.round(Number(this.value) || 0)));
+      var ov = $('bgOpacityVal');
+      if (ov) ov.textContent = state.bg.opacity + '%';
+      if (state.bg.active >= 0) {
+        document.body.style.setProperty('--fg-alpha', String(state.bg.opacity));
+      }
+    });
+    $('bgOpacity').addEventListener('change', function () {
+      state.bg.opacity = Math.min(100, Math.max(0, Math.round(Number(this.value) || 0)));
+      bgSaveMeta();
+      bgApply();
+    });
+
+    var c = $('bgCanvas');
+    /* one-finger drag / two-finger pinch */
+    c.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 1) {
+        bgEdit.lastX = e.touches[0].clientX; bgEdit.lastY = e.touches[0].clientY;
+      } else if (e.touches.length === 2) {
+        bgEdit.pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                                  e.touches[0].clientY - e.touches[1].clientY);
+      }
+      e.preventDefault();
+    }, { passive: false });
+    c.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 1 && bgEdit.img) {
+        var t = e.touches[0];
+        bgEdit.dx += t.clientX - bgEdit.lastX;
+        bgEdit.dy += t.clientY - bgEdit.lastY;
+        bgEdit.lastX = t.clientX; bgEdit.lastY = t.clientY;
+        bgCanvasDraw();
+      } else if (e.touches.length === 2 && bgEdit.pinch > 0 && bgEdit.img) {
+        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                           e.touches[0].clientY - e.touches[1].clientY);
+        bgScaleAt(d / bgEdit.pinch);
+        bgEdit.pinch = d;
+      }
+      e.preventDefault();
+    }, { passive: false });
+    c.addEventListener('touchend', function () { bgEdit.pinch = 0; });
+    c.addEventListener('wheel', function (e) {
+      if (!bgEdit.img) return;
+      e.preventDefault();
+      bgScaleAt(e.deltaY < 0 ? 1.1 : 1 / 1.1);
+    }, { passive: false });
+  }
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -671,6 +1117,12 @@
       if (el) el.disabled = !!on;
     });
     Array.prototype.forEach.call($('pillPreset').children, function (b) { b.disabled = !!on; });
+    var pbg = $('pillBg');
+    if (pbg) Array.prototype.forEach.call(pbg.children, function (b) { b.disabled = !!on; });
+    ['btnBgOff', 'btnBgPick', 'btnBgSave', 'btnBgClear', 'btnBgRename'].forEach(function (id) {
+      var el = $(id);
+      if (el) el.disabled = !!on;
+    });
     var pb = $('pillBits');
     if (pb) Array.prototype.forEach.call(pb.children, function (b) { b.disabled = !!on; });
     var ps = $('pillSpk');
@@ -1014,6 +1466,8 @@
   renderSpkDsp();
   renderPa();
   renderBp();
+  bgInit();
+  bgBind();
   renderDiag();
   refresh();
 })();
