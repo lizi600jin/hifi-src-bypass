@@ -139,9 +139,10 @@
     </div>
 
     <div class="field">
-      <label>BIT_PERFECT 输出通道（实验 · 仅 AIDL）</label>
+      <label>BIT_PERFECT 输出通道（实验 · 需 Android 14+ 与 AIDL）</label>
       <p class="hint">声明 Android 14+ 的 <strong>BIT_PERFECT 输出通道</strong>（<code>hifi_output</code>）并接入播放路由：播放器用 <code>preferred mixer attributes</code> API 请求即<strong>免混音、免重采样</strong>，直出比特完美。<br>
-      <strong>仅 AIDL 方言（高通新机型）生效</strong>，HIDL 机型应用时会被拒绝。<br>
+      <strong>需同时满足两项</strong>：<strong>Android 14+（SDK 34+）</strong>与 <strong>AIDL 方言</strong>；HIDL 老机型、移植 ROM 即使版本新也不支持，取不到版本号时同样按不满足处理。<br>
+      <strong>不满足时开启没有任何损失</strong>：应用时被拒绝，不写文件、不挂载、<strong>不会卡开机、不会死机重启</strong>，本机其余档位照常生效。<br>
       <strong>怎么选</strong>：关闭＝原厂；想验证就开启，再到播放器侧主动请求（<strong>实验</strong>，未请求走原混音路径，无副作用）。</p>
       <p class="hint" id="bpDialect" hidden></p>
       <div class="pills" id="pillBp">

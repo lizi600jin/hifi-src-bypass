@@ -45,11 +45,17 @@ END {
   # stripped from skeletons anyway, so the block is the open line + the close
   # line.  bpskip remembers that those two lines are allowance-only and every
   # comparison below walks S2 with the offset applied.
+  #
+  # The port's flags attribute carries TWO names on purpose (the schema-legal
+  # AUDIO_OUTPUT_FLAG_BIT_PERFECT plus the legacy short spelling); the regex
+  # below must therefore match that exact string, not just the short name --
+  # patcher and checker stay in lockstep.  See the long rationale in
+  # patch_policy.awk above emit_bp().
   bpallow = (BP + 0 == 1)
   bpskip = 0
   if (bpallow) {
     for (i = 1; i <= S2N; i++) {
-      if (S2[i] ~ /^<mixPort name="hifi_output" role="source" flags="BIT_PERFECT">$/) {
+      if (S2[i] ~ /^<mixPort name="hifi_output" role="source" flags="AUDIO_OUTPUT_FLAG_BIT_PERFECT BIT_PERFECT">$/) {
         bpskip = 2
         break
       }
@@ -65,7 +71,7 @@ END {
     bad = 0
     j = 0
     for (i = 1; i <= S2N; i++) {
-      if (bpskip > 0 && S2[i] ~ /^<mixPort name="hifi_output" role="source" flags="BIT_PERFECT">$/) { i++; continue }
+      if (bpskip > 0 && S2[i] ~ /^<mixPort name="hifi_output" role="source" flags="AUDIO_OUTPUT_FLAG_BIT_PERFECT BIT_PERFECT">$/) { i++; continue }
       j++
       cmp = S2[i]
       if (bpskip > 0) {

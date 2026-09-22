@@ -1390,9 +1390,11 @@ case "$BP_THR_N" in ''|*[!0-9]*) BP_THR_N=0 ;; esac
 # Which dialect is this phone?  Same rule as bin/hifi's dialect_of(): strip XML
 # comments, then the file is QTI/AIDL when pcmType= outnumbers
 # format="AUDIO_FORMAT_; HIDL/AOSP otherwise.  BIT_PERFECT is an AIDL-only
-# feature (Android officially supports the flag on the AIDL audio HAL), so on a
-# HIDL device this verdict is simply not applicable -- it must never print
-# "生效" no matter what dumpsys happens to contain.
+# feature (Android officially supports the flag on the AIDL audio HAL) AND it
+# needs Android 14+ (SDK 34): the flag does not exist in the Android 13 policy
+# schemas.  Either condition failing makes this verdict not applicable -- it
+# must never print "生效" no matter what dumpsys happens to contain.  Read-only:
+# plain getprop, nothing is written.
 bp_dialect_of() {
   awk '
     { ln = $0
@@ -1443,12 +1445,29 @@ if [ -r "$TGT" ]; then
   done < "$TGT"
 fi
 
+# Version half of the same gate: BIT_PERFECT was introduced in Android 14
+# (SDK 34) and an unreadable level is treated as "not satisfied" -- the module
+# itself refuses in exactly that case (bin/hifi do_apply, patch_policy.awk), so
+# the verdict here must agree with it instead of promising something the apply
+# would reject.
+BP_SDK="$(getprop ro.build.version.sdk 2>/dev/null)"
+case "$BP_SDK" in
+  ''|*[!0-9]*) BP_SDK_OK=no ;;
+  *) [ "$BP_SDK" -ge 34 ] 2>/dev/null && BP_SDK_OK=yes || BP_SDK_OK=no ;;
+esac
+
 if [ "${BP_DIA:-}" != qti ]; then
   printf '\n⑤b BIT_PERFECT : ⚪ 不适用（HIDL 方言，Android 官方仅 AIDL 支持 BIT_PERFECT）'
   if [ -n "${BP_DIA:-}" ]; then
     printf ' —— 本机策略方言判定为 %s，无论 dumpsys 里出现什么都与此项无关\n' "$BP_DIA"
   else
     printf ' —— 本机没有可判定的策略文件（或策略方言未知）\n'
+  fi
+elif [ "$BP_SDK_OK" != yes ]; then
+  if [ -n "$BP_SDK" ]; then
+    printf '\n⑤b BIT_PERFECT : ⚪ 不适用（版本不满足：需要 Android 14+ / SDK 34+，本机 SDK %s）—— 与方言无关，请勿据此判断方言\n' "$BP_SDK"
+  else
+    printf '\n⑤b BIT_PERFECT : ⚪ 不适用（无法确认版本：取不到 ro.build.version.sdk；BIT_PERFECT 需要 Android 14+ / SDK 34+，模块在同样情况下也会拒绝应用）\n'
   fi
 elif [ "$BP_DECL" != yes ]; then
   printf '\n⑤b BIT_PERFECT : ⚪ 未声明 —— 策略里没有 hifi_output 通道（BIT_PERFECT=1 时为 AIDL 机型声明该通道，未声明则播放器无法请求）\n'
