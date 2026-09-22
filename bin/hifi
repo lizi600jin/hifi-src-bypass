@@ -137,7 +137,7 @@ ALL_BITS="16 24 32"
 ALL_SPK="auto 44100 48000 96000 192000 384000"
 ALL_SPK_BITS="16 24 32"
 ALL_SPKDSP="16 24 32"
-ALL_BP="0"  # v1.9.2 stable line: BIT_PERFECT is not part of this build
+ALL_BP="0 1"
 
 # ------------------------------------------------------------------ candidates
 # Canonical locations, in the order the vendors actually use them.  Every one
@@ -1796,8 +1796,29 @@ pa_warning() {
 }
 
 # tinymix read -> "On" / "G_6_DB" / "" when the control is absent
+#
+# tinymix comes in two dialects and the K20 Pro ships the OLD one, where
+# `tinymix get <num>` is a parse error ("Invalid mixer control: get"):
+#   old (system/bin, pre-Toybox):  `tinymix <num>`       read
+#                                  `tinymix <num> <val>` write
+#   new (toybox):                  `tinymix get <num>`   read
+#                                  `tinymix set <num>`   write
+# Both reads therefore go through the argument-less form, which every
+# tinymix accepts.  The current value is the field carrying the `>` prefix
+# ("EAR PA Gain: >G_6_DB G_4P5_DB ..." old / ">G_6_DB:..." new); the last
+# column is the fallback for builds that mark the value differently.
 pa_get() {
-  $TMIX get "$1" 2>/dev/null | tr -d '\r' | awk '{print $NF}'
+  $TMIX "$1" 2>/dev/null | tr -d '\r' | awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        f = $i
+        if (f !~ />/) continue
+        sub(/>/, "", f)
+        if (f != "") { print f; exit }
+      }
+      print $NF
+      exit
+    }'
 }
 
 pa_conf_json_num() {
@@ -1841,12 +1862,41 @@ EOF
   return 0
 }
 
-# write one control and read it back; anything other than an exact match fails
+# write one control and read it back; anything other than an exact match fails.
+# Uses the argument-less two-positional form `tinymix <num> <value>`, which is
+# the write syntax of BOTH dialects (the new toybox `tinymix set <num> <val>`
+# is never used, so a single code path drives every build).
+#
+# BOOL read-back normalisation: the old (K20 Pro) tinymix echoes boolean
+# controls as words -- `tinymix 316 1` really does apply, but the read-back
+# says "On".  1 = On / 0 = Off (case-insensitive) is therefore accepted as a
+# match in BOTH directions; enum values (G_3_DB, MAX_STATE_2, ...) stay strict.
+pa_bool_like() {
+  case "$1" in
+    1|On|ON|on)  return 0 ;;
+    0|Off|OFF|off) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+# pa_bool_like returns 0 = on-like, 1 = off-like, 2 = not a boolean at all:
+# the class numbers must match (1 and On are the same class, etc.)
+pa_values_match() {
+  [ "$2" = "$1" ] && return 0
+  pa_bool_like "$1"; a=$?
+  [ "$a" != 2 ] || return 1
+  pa_bool_like "$2"; b=$?
+  [ "$a" = "$b" ] || return 1
+  return 0
+}
 pa_set() {
   ctl="$1"; val="$2"
-  $TMIX set "$ctl" "$val" 2>/dev/null || return 1
+  if ! $TMIX "$ctl" "$val" >/dev/null 2>&1; then
+    printf '!! 控件 %s 写入命令失败（tinymix 返回非零）\n' "$ctl" >&2
+    return 1
+  fi
   back="$(pa_get "$ctl")"
-  [ "$back" = "$val" ] || { printf '!! 控件 %s 写入后回读不符: %s\n' "$ctl" "${back:-（空）}" >&2; return 1; }
+  pa_values_match "$val" "$back" \
+    || { printf '!! 控件 %s 写入后回读不符: %s\n' "$ctl" "${back:-（空）}" >&2; return 1; }
   return 0
 }
 
@@ -1951,6 +2001,10 @@ do_pa() {
       if [ "$v" = 1 ]; then
         printf '%s\n' '开启 VI 电压电流回读（控件 316+317），供高级用户配合第三方工具读取'
       fi
+      # write the DIGIT: the old tinymix refuses enum words on BOOL controls
+      # ("Error: only enum types can be set with strings", exit 22) while both
+      # dialects accept 1/0 -- pa_set's BOOL normalisation then matches the
+      # digit against whatever the read-back echoes (On/Off or 1/0)
       if pa_set $TM_VI_1 "$v" && pa_set $TM_VI_2 "$v"; then
         if [ "$v" = 1 ]; then
           printf 'VI 回读已开启，数据口 /dev/tfa_rw（需 root 自行解析 DSP 帧）\n'
