@@ -117,9 +117,22 @@
     [32, '32-bit', '16 + 24 + 32bit']
   ];
 
+  /* Smart PA loudspeaker gain tiers (tinymix control 23 on TFA9874-class
+     devices).  0 = G_DEFAULT (factory, recommended); 1..6 = explicit +dB
+     tiers that RAISE SPEAKER DRIVE POWER -- every click runs a two-step
+     confirm on the device side as well (bin/hifi prints the warning). */
+  var PA_GAINS = [
+    [0, '出厂 0（推荐）'],
+    [1, '+1dB'], [2, '+2dB'], [3, '+3dB'],
+    [4, '+4dB'], [5, '+5dB'], [6, '+6dB']
+  ];
+
   var state = {
     mod: null, mixer: 48000, max: 384000, bits: 32, hifi: 'auto',
     spk: 'auto', spkBits: 16, spkDsp: 16,
+    spk: 'auto', spkBits: 16, spkDsp: 16, bp: 0, dialect: '', sdk: '',
+    paGain: null, paBoost: null,       /* smart PA knobs from `hifi json` */
+    paConfirm: null,                   /* first click of the two-step confirm */
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -402,6 +415,37 @@
     });
   }
 
+  /* smart PA pills.  the selected tier comes from state.pa_gain, i.e. from
+     the persisted CONFIG (json), never from a tinymix read -- the WebUI must
+     not depend on root-only mixer control reads. */
+  function renderPa() {
+    var host = $('pillPa');
+    if (!host) return;
+    host.innerHTML = '';
+    PA_GAINS.forEach(function (g) {
+      var el = document.createElement('button');
+      var cur = state.paGain === null ? 0 : Number(state.paGain);
+      el.className = 'pill' + (cur === g[0] ? ' sel' : '');
+      el.dataset.g = g[0];
+      el.textContent = g[1];
+      host.appendChild(el);
+    });
+    var st = $('paState');
+    if (st) {
+      if (state.paGain === null || state.paGain === undefined) {
+        st.textContent = '当前：未配置（出厂 0 · 原厂功率）';
+      } else if (Number(state.paGain) === 0) {
+        st.textContent = '当前：出厂 0（原厂功率，最安全）';
+      } else {
+        st.textContent = '当前：+' + Number(state.paGain) +
+          'dB（高于原厂功率，注意破音立即回出厂 0）';
+      }
+      if (state.paBoost !== null && state.paBoost !== undefined && Number(state.paBoost) !== 2) {
+        st.textContent += '；boost ' + Number(state.paBoost) + '（非出厂满档 2，省电但削峰更早）';
+      }
+    }
+  }
+
   /* BIT_PERFECT is gated by TWO independent conditions on the device side
      (bin/hifi do_apply + payload/patch_policy.awk, same rule in both):
        1. dialect == qti (the AIDL audio HAL);          [dialect is a string]
@@ -444,6 +488,11 @@
     state.spk = s.spk_rate || 'auto';
     state.spkBits = Number(s.spk_bits) || 16;
     state.spkDsp = Number(s.spk_dsp_bits) || 16;
+    /* smart PA: null (json null / absent) = the config never touches the PA,
+       i.e. factory 0.  Any number 0..6 is what the config will apply. */
+    state.paGain = (s.pa_gain === undefined || s.pa_gain === null) ? null : Number(s.pa_gain);
+    state.paBoost = (s.pa_boost === undefined || s.pa_boost === null) ? null : Number(s.pa_boost);
+    state.paConfirm = null;
     state.restart = !(s.restart === 0 || s.restart === false);
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
@@ -519,6 +568,7 @@
     renderSpk();
     renderSpkBits();
     renderSpkDsp();
+    renderPa();
     renderBp();
     renderDac(s);
     renderDiag();
@@ -574,6 +624,8 @@
     if (psb) Array.prototype.forEach.call(psb.children, function (b) { b.disabled = !!on; });
     var psd = $('pillSpkDsp');
     if (psd) Array.prototype.forEach.call(psd.children, function (b) { b.disabled = !!on; });
+    var pp = $('pillPa');
+    if (pp) Array.prototype.forEach.call(pp.children, function (b) { b.disabled = !!on; });
     if (on && label) $('btnApply').textContent = label;
     if (!on) $('btnApply').textContent = '应用并生效';
   }
@@ -787,6 +839,41 @@
       });
   }
 
+  /* smart PA loudspeaker gain: `hifi pa gain <n>` (n=0 => `pa gain reset`).
+     Two-step confirm: the FIRST click on a tier only shows the warning (the
+     banner doubles as the confirmation line), the SECOND click on the SAME
+     tier actually fires the command.  Any other click resets the arm. */
+  function runPaGain(n) {
+    if (state.paConfirm !== n) {
+      state.paConfirm = n;
+      var lvl = n === 0 ? '回到出厂 0（原厂功率，最安全）'
+                        : '把扬声器 PA 增益提高到 +' + n + 'dB';
+      banner('⚠ ' + lvl + ' —— 这会直接增大扬声器驱动功率，可能造成振膜损伤/失真/硬件损坏。' +
+             '再次点击同一档确认执行；听到破音立即回出厂 0。', true);
+      return;
+    }
+    state.paConfirm = null;
+    busy(true, '调整 PA…');
+    var tier = n === 0 ? 'gain reset' : 'gain ' + n;
+    return hifi('pa ' + tier)
+      .then(function (r) {
+        busy(false);
+        var txt = ((r.stdout || '') + (r.stderr || '')).trim();
+        if (r.errno !== 0) {
+          banner('Smart PA 调整失败：' + (txt || 'unknown'), true);
+        } else {
+          toast(n === 0 ? 'PA 增益已回出厂 0' : 'PA 增益已设为 +' + n + 'dB');
+          banner(txt, false);
+        }
+        return refresh();
+      })
+      ['catch'](function (e) {
+        busy(false);
+        banner('Smart PA 调整失败：' + explain(e), true);
+        renderDiag();
+      });
+  }
+
   /* one-tap restore: lossless, reversible, settings are kept */
   function restoreFactory() {
     var msg = '一键还原：立即卸载补丁、回到原厂音频策略，并重启音频服务。\n\n' +
@@ -820,6 +907,7 @@
     else if (host.id === 'pillSpk') { state.spk = el.dataset.v === 'auto' ? 'auto' : Number(el.dataset.v); renderSpk(); return; }
     else if (host.id === 'pillSpkBits') { state.spkBits = Number(el.dataset.b); renderSpkBits(); return; }
     else if (host.id === 'pillSpkDsp') { state.spkDsp = Number(el.dataset.d); renderSpkDsp(); return; }
+    else if (host.id === 'pillPa') { runPaGain(Number(el.dataset.g)); return; }
     else return;
     renderPills();
   });
@@ -867,6 +955,7 @@
   renderSpk();
   renderSpkBits();
   renderSpkDsp();
+  renderPa();
   renderBp();
   renderDiag();
   refresh();

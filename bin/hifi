@@ -118,7 +118,15 @@ SPK_DSP_BITS=16
 #      so an older or unreadable SDK is refused as well.
 # 0 = off (v1.9.1 behaviour).
 BIT_PERFECT=0
-
+# Smart PA power layer (NXP TFA9874-class devices, driven purely through
+# runtime tinymix writes -- zero files, zero mounts).  Empty = never touch the
+# PA (factory behaviour, the safe default).  PA_GAIN=<0..6> raises the
+# loudspeaker PA gain (control 23) on every apply; PA_BOOST=<1|2> sets the
+# boost max state (controls 24+25).  "reset" behaves like empty.  This layer
+# is deliberately decoupled from the policy mount layer: restore never touches
+# the PA controls.
+PA_GAIN=""
+PA_BOOST=""
 
 DIRECT_POOL="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
 USB_POOL="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
@@ -297,6 +305,9 @@ load_conf() {
   [ "$ok" = 1 ] || SPK_BITS=16
   case "$SPK_DSP_BITS" in 16|24|32) ;; *) SPK_DSP_BITS=16 ;; esac
   case "$BIT_PERFECT" in 0|1) ;; *) BIT_PERFECT=0 ;; esac
+  # smart PA knobs: "" (= factory / untouched) or a valid tier, never guessed
+  case "$PA_GAIN" in ""|reset|[0-6]) ;; *) PA_GAIN="" ;; esac
+  case "$PA_BOOST" in ""|reset|1|2) ;; *) PA_BOOST="" ;; esac
   # The device's API level, read once per command (pure getprop, no side
   # effect).  Kept as the raw string: "" = unknown, and the BIT_PERFECT gate
   # treats unknown as "refuse".  The patcher gets it as -v SDK=, because awk
@@ -349,6 +360,14 @@ BIT_PERFECT=$BIT_PERFECT
 #              on every apply (24 / 32).  16 = nothing is injected; a value
 #              left on the system is only cleared by hifi restore.
 SPK_DSP_BITS=$SPK_DSP_BITS
+# PA_GAIN    : smart PA loudspeaker gain tier written via tinymix on apply
+#              (empty / reset = never touch the PA, the factory behaviour).
+#              0..6 = explicit dB tier.  THIS CHANGES SPEAKER DRIVE POWER:
+#              start at 0 (+1dB) and listen before going higher.
+PA_GAIN=$PA_GAIN
+# PA_BOOST   : smart PA boost max state (empty / reset = untouched, 1 = stepped
+#              down (saves power, clips earlier), 2 = factory full stage).
+PA_BOOST=$PA_BOOST
 # ENABLED    : 1 = patch mounted, 0 = factory policy in use
 ENABLED=$ENABLED
 # RESTART    : 1 = restart the audio stack right after applying, 0 = reboot later
@@ -1095,6 +1114,10 @@ status_json() {
   printf '  "bit_perfect": %s,\n' "$BIT_PERFECT"
   printf '  "dialect": "%s",\n' "$(current_dialect)"
   printf '  "spk_dsp_bits": %s,\n' "$SPK_DSP_BITS"
+  # smart PA knobs are reported from the CONFIG, never from tinymix: the WebUI
+  # must not depend on root-only mixer control reads
+  printf '  "pa_gain": %s,\n' "$(pa_conf_json_num "$PA_GAIN")"
+  printf '  "pa_boost": %s,\n' "$(pa_conf_json_num "$PA_BOOST")"
   printf '  "bit_profiles": "%s",\n' "$(bitdepth_profiles "$BIT_DEPTH")"
   printf '  "restart": %s,\n' "$RESTART"
   printf '  "rates": [%s],\n' "$(printf '%s' "$ALL_RATES" | tr ' ' ',')"
@@ -1476,6 +1499,9 @@ do_apply() {
         && log "dsp_bit_width_enforce_mode=$SPK_DSP_BITS injected (takes effect when the audio HAL restarts)"
       ;;
   esac
+  # smart PA layer: config-driven runtime tinymix writes, AFTER the dsp
+  # injection and BEFORE the report.  Empty / reset = nothing is touched.
+  pa_apply_conf
   do_report >/dev/null 2>&1
   return 0
 }
@@ -1737,6 +1763,214 @@ do_speaker() {
   do_apply
 }
 
+# ================================================================== smart PA
+# NXP TFA9874-class smart PA layer, driven ONLY through runtime tinymix reads
+# and writes.  Zero files touched, zero mounts -- this is a completely separate
+# layer from the policy mount stack above, so restore deliberately does NOT
+# touch any PA control.
+#
+# Controls (Redmi K20 Pro / raphael probe, see the maintainer report):
+#   3174 TFA Profile            single "speaker" tier, switching is refused
+#   22   EAR PA Gain            earpiece (no user command -- mis-touch guard)
+#   23   EAR SPKR PA Gain       loudspeaker gain, the knob users actually want
+#   24/25 SPKR Left/Right Boost Max State
+#   316/317 AIF4_VI Mixer SPKR_VI_1/2   voltage/current feedback switches
+#   3178 ALGO_STATUS            PROTECTED: ENABLE is the burn-the-speaker knob
+# Hard refusals below are deliberate: 3175 (mute), 3176 (stop), 3177
+# (calibration), 3178 (algo), profile switching and /dev/tfa_reg writes are
+# never emitted, not even by accident.
+TMIX="tinymix"
+TM_PROFILE=3174
+TM_EAR_GAIN=22
+TM_SPK_GAIN=23
+TM_BOOST_L=24
+TM_BOOST_R=25
+TM_VI_1=316
+TM_VI_2=317
+TM_ALGO=3178
+PA_SNAPSHOT="$STATE/pa.txt"
+
+pa_warning() {
+  printf '%s\n' \
+    '!! 警告：提高 PA 增益会增大扬声器功率，可能造成振膜损伤/失真/硬件损坏，请从小档开始试听'
+}
+
+# tinymix read -> "On" / "G_6_DB" / "" when the control is absent
+pa_get() {
+  $TMIX get "$1" 2>/dev/null | tr -d '\r' | awk '{print $NF}'
+}
+
+pa_conf_json_num() {
+  case "$1" in
+    [0-6]) printf '%s' "$1" ;;
+    *)     printf 'null' ;;
+  esac
+}
+
+# compare a value against the factory default shown in the status overview
+pa_is_factory_gain()   { case "$1" in G_DEFAULT|G_6_DB) return 0 ;; esac; return 1; }
+pa_is_factory_boost()  { case "$1" in MAX_STATE_2) return 0 ;; esac; return 1; }
+pa_is_factory_vi()     { case "$1" in Off|"") return 0 ;; esac; return 1; }
+
+pa_status() {
+  load_conf
+  prof="$(pa_get $TM_PROFILE)"
+  ear="$(pa_get $TM_EAR_GAIN)"
+  spk="$(pa_get $TM_SPK_GAIN)"
+  bl="$(pa_get $TM_BOOST_L)"
+  br="$(pa_get $TM_BOOST_R)"
+  v1="$(pa_get $TM_VI_1)"
+  algo="$(pa_get $TM_ALGO)"
+  miss=0
+  for v in "$prof" "$ear" "$spk" "$bl" "$br" "$v1" "$algo"; do
+    [ -n "$v" ] || miss=1
+  done
+  cat <<EOF
+Smart PA (TFA9874 via tinymix)
+  PA profile        : ${prof:-n/a} (唯一档，不支持换挡)
+  earpiece gain     : ${ear:-n/a}$([ -n "$ear" ] && pa_is_factory_gain "$ear" && printf ' (出厂值)')
+  speaker gain      : ${spk:-n/a}$([ -n "$spk" ] && [ "$spk" = G_DEFAULT ] && printf ' (出厂值)')   ← 控件 23
+  boost max state   : L/R = ${bl:-n/a} / ${br:-n/a}$([ -n "$bl" ] && [ -n "$br" ] && pa_is_factory_boost "$bl" && pa_is_factory_boost "$br" && printf ' (出厂值)')
+  vi feedback       : ${v1:-n/a}$([ -n "$v1" ] && pa_is_factory_vi "$v1" && printf ' (出厂值)')
+  protection algo   : enabled (DSP 内置，不可关)
+EOF
+  if [ "$miss" = 1 ]; then
+    printf '本机无 TFA smart PA 或控件号不同，功能不可用\n'
+    return 1
+  fi
+  return 0
+}
+
+# write one control and read it back; anything other than an exact match fails
+pa_set() {
+  ctl="$1"; val="$2"
+  $TMIX set "$ctl" "$val" 2>/dev/null || return 1
+  back="$(pa_get "$ctl")"
+  [ "$back" = "$val" ] || { printf '!! 控件 %s 写入后回读不符: %s\n' "$ctl" "${back:-（空）}" >&2; return 1; }
+  return 0
+}
+
+# the apply-time hook: config-driven, warnings printed, read-back verified
+pa_apply_conf() {
+  load_conf
+  applied_any=0
+  case "$PA_GAIN" in
+    [0-6])
+      pa_warning
+      if pa_set $TM_SPK_GAIN "G_${PA_GAIN}_DB"; then
+        printf 'earpiece-speaker PA gain = G_%s_DB\n' "$PA_GAIN"
+        applied_any=1
+      else
+        printf '!! PA_GAIN 写入失败（本机可能无 TFA smart PA），扬声器增益保持原值\n' >&2
+      fi
+      ;;
+  esac
+  case "$PA_BOOST" in
+    1|2)
+      [ "$applied_any" = 1 ] || pa_warning
+      if pa_set $TM_BOOST_L "MAX_STATE_${PA_BOOST}" && pa_set $TM_BOOST_R "MAX_STATE_${PA_BOOST}"; then
+        printf 'speaker boost max state = MAX_STATE_%s (L/R)\n' "$PA_BOOST"
+      else
+        printf '!! PA_BOOST 写入失败（本机可能无 TFA smart PA），boost 保持原值\n' >&2
+      fi
+      ;;
+  esac
+  return 0
+}
+
+pa_snapshot() {
+  pa_status > "$PA_SNAPSHOT" 2>&1 || true
+  printf '已写入 %s\n' "$PA_SNAPSHOT"
+}
+
+pa_usage() {
+  echo "pa must be one of: status | scan | gain | boost | vi"
+  echo "  status        当前 smart PA 全量状态（纯读）"
+  echo "  scan          状态快照写入 $PA_SNAPSHOT（供 WebUI 轮询）"
+  echo "  gain <0..6>   外放 PA 增益档（写控件 23；0 = 回出厂 G_DEFAULT）"
+  echo "  boost <1|2>   boost 上限档（写控件 24+25；2 = 出厂满档）"
+  echo "  vi <on|off>   VI 电压电流回读开关（写控件 316+317，配合 /dev/tfa_rw）"
+  return 1
+}
+
+do_pa() {
+  sub="${1:-status}"
+  case "$sub" in
+    status)
+      pa_status ;;
+    scan)
+      ensure_dirs
+      pa_snapshot ;;
+    gain)
+      shift
+      case "${1:-}" in
+        reset) n=0 ;;
+        [0-6]) n="$1" ;;
+        *)     pa_usage; return 1 ;;
+      esac
+      if [ "$n" = 0 ]; then
+        val=G_DEFAULT
+        printf '%s\n' '恢复外放 PA 增益到出厂值'
+      else
+        val="G_${n}_DB"
+        pa_warning
+      fi
+      if pa_set $TM_SPK_GAIN "$val"; then
+        printf 'earpiece-speaker PA gain = %s\n' "$val"
+        printf '提示：控件 22（听筒）不受此命令影响；数值越大失真越大，出现破音立即执行: hifi pa gain reset\n'
+      else
+        printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
+        return 1
+      fi ;;
+    boost)
+      shift
+      case "${1:-}" in
+        reset) m=2 ;;
+        1|2)   m="$1" ;;
+        *)     pa_usage; return 1 ;;
+      esac
+      if [ "$m" = 2 ]; then
+        printf '%s\n' '恢复 boost 上限到出厂满档 MAX_STATE_2'
+      else
+        printf '%s\n' '!! 警告：提高 PA 增益会增大扬声器功率，可能造成振膜损伤/失真/硬件损坏，请从小档开始试听'
+        printf '%s\n' 'boost 1 = 降压省电档，削峰更早（省电不保真）；2 = 出厂满档'
+      fi
+      if pa_set $TM_BOOST_L "MAX_STATE_${m}" && pa_set $TM_BOOST_R "MAX_STATE_${m}"; then
+        printf 'speaker boost max state = MAX_STATE_%s (L/R)\n' "$m"
+      else
+        printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
+        return 1
+      fi ;;
+    vi)
+      shift
+      case "${1:-}" in
+        on)  v=1 ;;
+        off) v=0 ;;
+        *)   pa_usage; return 1 ;;
+      esac
+      if [ "$v" = 1 ]; then
+        printf '%s\n' '开启 VI 电压电流回读（控件 316+317），供高级用户配合第三方工具读取'
+      fi
+      if pa_set $TM_VI_1 "$v" && pa_set $TM_VI_2 "$v"; then
+        if [ "$v" = 1 ]; then
+          printf 'VI 回读已开启，数据口 /dev/tfa_rw（需 root 自行解析 DSP 帧）\n'
+        else
+          printf 'VI 回读已关闭\n'
+        fi
+      else
+        printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
+        return 1
+      fi ;;
+    algo|mute|stop|calib|profile)
+      # hard refusals: these controls burn / mute / stop or de-calibrate the
+      # speaker -- they are never exposed, not even as a "helpful" option
+      printf '!! 已拒绝：控件 3178 ALGO_STATUS / 3175 Mute / 3176 Stop / 3177 Calibration / 3174 换挡 是扬声器安全红线，本模块永不提供\n' >&2
+      return 1 ;;
+    *)
+      pa_usage ;;
+  esac
+}
+
 do_verify() {
   printf 'config        : mixer=%s ceiling=%s bits=%s enabled=%s\n' \
          "$MIXER_RATE" "$MAX_RATE" "$BIT_DEPTH" "$ENABLED"
@@ -1932,6 +2166,13 @@ HiFi SRC Bypass  (universal)   v${_uv}
                            (if the speaker goes silent, run: hifi speaker auto)
   hifi speaker auto        back to the factory speaker behaviour (16-bit, auto rate)
   hifi speaker status      current speaker knobs + the vendor DSP check of probe [9]
+  hifi pa                  smart PA (TFA9874) status overview (read-only)
+  hifi pa status           same as above
+  hifi pa scan             snapshot the PA state to the state dir (WebUI poll)
+  hifi pa gain <0..6>      loudspeaker PA gain tier via tinymix control 23
+                           (POWER WARNING printed first; 0 / reset = factory)
+  hifi pa boost <1|2>      boost max state via controls 24+25 (2 = factory)
+  hifi pa vi <on|off>      VI voltage/current feedback switches (316+317)
   hifi bootmode            show the boot safety-net state (normal/discover-only/degraded)
   hifi apply               TURN ON : patch + mount, persists across reboots
   hifi restore             TURN OFF: unmount, back to factory, module stays
@@ -1966,6 +2207,7 @@ case "${1:-status}" in
   set)        ensure_dirs; load_conf; do_set "${2:-}" "${3:-}" ;;
   preset)     ensure_dirs; load_conf; do_preset "${2:-}" ;;
   speaker)    ensure_dirs; load_conf; do_speaker "${2:-}" ;;
+  pa)         ensure_dirs; load_conf; do_pa "${2:-}" "${3:-}" ;;
   bootmode)   ensure_dirs; do_bootmode ;;
   apply)      ensure_dirs; load_conf; do_apply ;;
   restore)    ensure_dirs; load_conf; do_restore ;;
