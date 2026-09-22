@@ -80,7 +80,14 @@
         <button class="pill" data-v="384000">384 kHz<em>拉满 · 高端机型</em></button>
       </div>
       <p class="hint">换档<strong>把整个混音端口重写成你选的频率</strong>（框架取列表最大值，只加一项没用）；免 SRC 的前提是<strong>混音率 = 音源率</strong>。<br>
-      改完点「应用并生效」立即生效。</p>
+      改完点「应用并生效」立即生效。
+      <br>
+      <strong>超越原厂</strong>：原厂混音器只有 <strong>48k 一个工作率</strong>，44.1k 曲库每一帧都要过 SRC ——
+      把混音率钉到 <strong>44.1 kHz</strong>，全部 App 的音乐回放链路<strong>零重采样</strong>，这是本模块最大的一处超越。
+      <br>
+      <strong>操作</strong>：以听音乐为主选 44.1k（点「应用并生效」即时切换，<strong>无需重启</strong>）；
+      常看视频的日子切回 48k（视频等 48k 内容走 147:160 非整数重采样会变差）。
+      切换后可在「深度校验 [3]」看到运行时上限已变成你钉的值。</p>
     </div>
 
     <div class="field">
@@ -94,7 +101,14 @@
       <label>HiFi 通道率（USB 实际通路）</label>
       <p class="hint">插上小尾巴后 USB 音频<strong>不走混音器</strong>，走厂商 HiFi 端口（如 <code>hifi_playback</code>）。<br>
       <strong>怎么选</strong>：钉在<strong>你正在听的音源采样率</strong>上，该率即<strong>比特完美</strong> —— 网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz（推荐）</strong>，96k 母带选 96 kHz。<br>
-      其余率只会上采样、不丢内容，<strong>永远不要往下选</strong>（有损下采样）；<code>auto</code>＝原厂行为。</p>
+      其余率只会上采样、不丢内容，<strong>永远不要往下选</strong>（有损下采样）；<code>auto</code>＝原厂行为。
+      <br>
+      <strong>超越原厂</strong>：原厂 HiFi 端口<strong>永远跟着 DAC 最大能力走</strong>，任何音源都被拉到最高率重采样 ——
+      把它钉到<strong>你曲库的采样率</strong>，该率内容<strong>比特完美直出</strong>（192k 母带 / 臻品音质即真无损全链路）。
+      <br>
+      <strong>操作</strong>：听 192k 母带选 <strong>192 kHz</strong>，96k 母带选 96 kHz；曲库以 44.1k 为主则钉
+      <strong>44.1 kHz</strong>（母带内容走 4 倍整数升采样，无损折算）。播放时在「深度校验 5b」看到
+      <code>hifi_playback + 192000 + PCM_32_BIT</code> 即为达成；拿不准选 <code>auto</code>（＝原厂，不会更差）。</p>
       <div class="pills" id="pillHifi"></div>
     </div>
 
@@ -109,7 +123,14 @@
     <div class="field">
       <label>扬声器采样率档位</label>
       <p class="hint">手机<strong>扬声器 / 听筒</strong>端口的采样率：钉死为曲库采样率后，扬声器回放<strong>也免于 SRC</strong>（原厂常锁 48 kHz，播 44.1k 会先被重采样）。<br>
-      <strong>怎么选</strong>：44.1k 曲库选 <strong>44.1 kHz（推荐，配「扬声器一键优化」）</strong>，其他情况保留 <strong>auto</strong>＝原厂；不要往下选（有损下采样）。</p>
+      <strong>怎么选</strong>：44.1k 曲库选 <strong>44.1 kHz（推荐，配「扬声器一键优化」）</strong>，其他情况保留 <strong>auto</strong>＝原厂；不要往下选（有损下采样）。
+      <br>
+      <strong>超越原厂</strong>：原厂扬声器端口常<strong>锁死 48 kHz</strong>，44.1k 音乐外放必被重采样 ——
+      钉到 <strong>44.1 kHz</strong> 后外放同样零重采样，与混音率组成全链路免 SRC。
+      <br>
+      <strong>操作</strong>：外放听音乐钉 44.1k（或直接用下面「扬声器一键优化」一步到位），
+      在「深度校验 ⑤」看到「扬声器档位生效 ✅」即达成；外放看视频为主则保留 <code>auto</code>（48k 内容非整数降采样会变差）。
+      蓝牙音箱 / 车机走同一端口，SBC / AAC 设备听感变差先回 <code>auto</code> 验证。</p>
       <div class="pills" id="pillSpk"></div>
     </div>
 
@@ -124,14 +145,24 @@
       <label>DSP 位宽强制</label>
       <p class="hint">把高通 QTI 的 ADSP <strong>ASM 流强制到指定位宽</strong>（注入属性 <code>persist.vendor.audio_hal.dsp_bit_width_enforce_mode</code>），让扬声器回放的混音链路以更高位宽工作、减少中间截位。<br>
       <strong>怎么选</strong>：<strong>24-bit（推荐）</strong>，硬件与 ROM 支持时可用 32-bit；<strong>16（关）</strong>＝原厂行为，出问题第一个回退到它。<br>
-      点「应用并生效」时注入、重启服务后生效，「一键还原」自动清除（纯属性层）。</p>
+      点「应用并生效」时注入、重启服务后生效，「一键还原」自动清除（纯属性层）。
+      <br>
+      <strong>超越原厂</strong>：原厂从不注入该属性，ADSP 混音链路按默认位宽<strong>中间截位</strong> ——
+      强制到 <strong>24-bit</strong> 后扬声器链路以更高位宽工作，这是位深层面唯一的扬声器超越点。
+      <br>
+      <strong>操作</strong>：先在系统设置<strong>关闭杜比 / 空间音频等厂商音效</strong>（排除 DSP 叠加干扰），再选
+      24-bit 点「应用并生效」，重启音频服务后在「深度校验 ⑥」看到「已注入」且 live 属性 = 24 即达成。
+      听感对比基准是 <strong>16（关）</strong>：若叠加厂商音效反而变差，顺序回退「关音效 → DSP 回 16 → 位深回 16」。</p>
       <div class="pills" id="pillSpkDsp"></div>
     </div>
 
     <div class="field">
       <label>扬声器一键优化</label>
       <p class="hint">一键把扬声器 / 听筒设成「<strong>44.1 kHz + 24bit</strong>」免 SRC 组合：回放不再被系统重采样、位深同时补齐（<strong>推荐</strong>）。<br>
-      「还原 auto (16bit)」把档位交回系统；更高档（192 kHz / 32bit）属 <strong>实验</strong>，终端跑 <code>hifi speaker hires</code>。</p>
+      「还原 auto (16bit)」把档位交回系统；更高档（192 kHz / 32bit）属 <strong>实验</strong>，终端跑 <code>hifi speaker hires</code>。
+      <br>
+      <strong>超越原厂</strong>：一键完成「44.1 kHz + 24bit」双超越组合（免重采样 + 补位深），是扬声器档位
+      <strong>推荐的最终形态</strong>；常外放看视频请改用「还原 auto」。</p>
       <div class="pills">
         <button class="pill" id="btnSpkFlat">一键优化 (44.1k / 24bit)<em>44.1k 曲库 · 推荐</em></button>
         <button class="pill" id="btnSpkAuto">还原 auto (16bit)<em>回到原厂</em></button>
