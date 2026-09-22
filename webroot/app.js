@@ -1,4 +1,4 @@
-/* HiFi SRC Bypass - WebUI front-end  (universal, v1.9.1)
+/* HiFi SRC Bypass - WebUI front-end  (universal)
  *
  * Talks to bin/hifi through the KernelSU / APatch root bridge.
  * Every command is a plain shell line, so it also works from a terminal.
@@ -462,7 +462,14 @@
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
 
-    $('badgeVersion').textContent = 'v' + (s.version || '?');
+    /* The version appears twice on the page (hero badge + footer).  Both are
+       rendered from the same `hifi json` field, which bin/hifi reads from
+       module.prop -> version=, so bumping the module version can never leave a
+       stale number behind in the shipped HTML. */
+    var verTxt = 'v' + (s.version || '?');
+    $('badgeVersion').textContent = verTxt;
+    var footVer = $('footVersion');
+    if (footVer) footVer.textContent = verTxt;
     var badge = $('badgeApplied');
     if (s.enabled === 0) { badge.textContent = '已还原原厂'; badge.className = 'badge off'; }
     else if (s.applied) { badge.textContent = '补丁生效中'; badge.className = 'badge on'; }

@@ -1402,6 +1402,30 @@ do_apply() {
   fi
   apply_mount || { save_conf; return 1; }
   save_conf
+  # ---- P0-2 follow-up: an explicit apply hands back a full retry budget ------
+  # `apply` is the user (or action.sh) saying "turn it on": it already clears a
+  # previous restore just above.  The circuit-breaker counter counts *boots whose
+  # audioserver came up unhealthy* (service.sh L70-86) and has served its whole
+  # purpose the moment it disabled auto-start.  Carrying it across a successful
+  # re-apply would make the NEXT unhealthy boot trip the breaker instantly: the
+  # user sees the module switch itself off again after a single bad boot, with
+  # no second chance, even though re-applying was an explicit request.
+  # Cleared on success ONLY:
+  #   * a failed apply_mount returns above -- its exit path persists the config
+  #     for a later attempt and deliberately leaves the history alone;
+  #   * a successful one means a full target list was mounted and verified
+  #     again, which is a genuinely clean slate for what was being counted.
+  # service.sh L91 remains the other, independent clear (a healthy boot clears
+  # the history even when the user asked for nothing).
+  if [ -r "$STATE/bootfail.count" ]; then
+    bf_prev="$(head -n1 "$STATE/bootfail.count" 2>/dev/null | tr -d '[:space:]')"
+    rm -f "$STATE/bootfail.count" 2>/dev/null
+    # speak up only for a real count (a stale 0 / garbage is not a history)
+    case "$bf_prev" in
+      ''|0|*[!0-9]*) : ;;
+      *) log "boot-failure history cleared (previous count=$bf_prev)" ;;
+    esac
+  fi
   if [ "$RESTART" = 1 ]; then
     restart_audio
   else
@@ -1625,6 +1649,17 @@ do_bootmode() {
     printf '  boot 安全网已就绪：post-fs-data 8s 超时自保 + audioserver 不健康自动卸载。\n'
   fi
   [ -r "$STATE/bootfail.count" ] && printf 'bootfail.count: %s（连续不健康开机次数，达 2 自动关闭自启）\n' "$(cat "$STATE/bootfail.count" 2>/dev/null)"
+  # P0-2 follow-up: make the way out discoverable.  Read ENABLED from the file
+  # instead of $ENABLED: the `bootmode` dispatch has no load_conf, so $ENABLED
+  # here is only the global default and would call every device enabled.
+  bf_n=""
+  [ -r "$STATE/bootfail.count" ] && bf_n="$(head -n1 "$STATE/bootfail.count" 2>/dev/null | tr -d '[:space:]')"
+  case "$bf_n" in ''|*[!0-9]*) bf_n=0 ;; esac
+  # $CONF, not $CONFIG: the persisted config is CONF="$STATE/config.conf" (L59).
+  en="$(sed -n 's/^ENABLED=//p' "$CONF" 2>/dev/null | head -n1)"
+  if [ "$bf_n" -ge 2 ] || [ "$en" = 0 ]; then
+    printf '  恢复：hifi set enabled 1 && hifi apply   （重新开启并立即重挂；连续失败计数会在成功 apply 后清零）\n'
+  fi
   return 0
 }
 
@@ -1802,8 +1837,22 @@ migrate_old() {
 }
 
 usage() {
+  # Read the version from module.prop so `hifi` (and the help text users paste
+  # into bug reports) can never drift from the shipped version= line.
+  # Safe under `set -u` and when module.prop is missing/unreadable: _uv is always
+  # assigned.  The version is interpolated into a `cat <<EOF` heredoc, so every
+  # character that the shell could act on (backslash, backtick, $) is deleted
+  # rather than escaped -- a hostile module.prop must not be able to run code
+  # through `hifi`'s help text.
+  _uv="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1 \
+         | tr -d '\\`$' | tr -cd 'A-Za-z0-9._+-')"
+  # module.prop carries a bare "2.0.0"; the help text shows "v2.0.0".  Drop an
+  # optional leading v so the two can never render as "vv2.0.0", and fall back
+  # to the same "v?" the WebUI version badge uses.
+  _uv="${_uv#v}"; _uv="${_uv#V}"
+  [ -n "$_uv" ] || _uv="?"
   cat <<EOF
-HiFi SRC Bypass  (universal)   v2.0.0
+HiFi SRC Bypass  (universal)   v${_uv}
 
   hifi status              show current state + the files in use + DAC
   hifi scan                rescan the ROM for audio policy files AND USB HAL libs

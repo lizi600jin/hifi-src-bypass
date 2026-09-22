@@ -117,8 +117,24 @@ port_scan() {
   }' "$1" 2>/dev/null
 }
 
+# One port name per line -- deliberately NOT space separated.  AOSP / HIDL
+# policy files name their ports "USB Device Out", "USB Headset Out", "Wired
+# Headset" ... so a space-joined list cannot be split back into port names:
+# `for p in $USB_PORTS` broke one port into three words, and the reporting
+# re-glued the pieces into the unreadable "USBDeviceOutUSBHeadsetOut".  Every
+# consumer below therefore iterates with `while IFS= read -r p ... done <<EOF`
+# (which runs in THIS shell, so accumulators like USB_DIRECT survive), or reads
+# the names from a file inside awk.  Display goes through ports_disp.
 names_of() {  # names_of <class> ; uses PORT_MAP
-  awk -F'|' -v c="$1" '$1==c { if (out == "") out=$2; else out=out" "$2 } END { print out }' "$PORT_MAP" 2>/dev/null
+  awk -F'|' -v c="$1" '$1==c { print $2 }' "$PORT_MAP" 2>/dev/null
+}
+
+# Render such a list as one human-readable line, for printf/output only.
+# Never feed the result back into a loop: that re-introduces the very
+# space splitting this representation exists to avoid.
+ports_disp() {  # ports_disp <newline-list> [fallback-when-empty]
+  _pd="$(printf '%s\n' "${1:-}" | tr '\n' ' ' | sed 's/  */ /g; s/^ *//; s/ *$//')"
+  if [ -n "$_pd" ]; then printf '%s' "$_pd"; else printf '%s' "${2:-}"; fi
 }
 
 # strip XML comments (including multi-line ones -- the vendor files hide a
@@ -262,9 +278,11 @@ if [ -n "$POLICY_FILES" ]; then
   for f in $POLICY_FILES; do
     port_scan "${POLICY_ROOT:-}${f}" >> "$PORT_MAP"
   done
+  # $POLICY_FILES is space separated on purpose (the paths themselves never
+  # contain spaces); the port NAMES are not, hence ports_disp.
   for c in USB WIRED DIR MIX SPK; do
-    n="$(names_of "$c")"
-    printf '  %-6s : %s\n' "$c" "${n:-（无）}"
+    n="$(ports_disp "$(names_of "$c")" '（无）')"
+    printf '  %-6s : %s\n' "$c" "$n"
   done
 else
   printf '  跳过\n'
@@ -423,24 +441,35 @@ if [ -n "$POLICY" ]; then
   printf '配置(config.conf) : 混音 %s Hz / 采样率上限 %s Hz / 位深上限 %s bit\n' \
     "${CONFIG_MIX:-?}" "${CONFIG_MAX:-?}" "${CONFIG_BITS:-?}"
   printf '\n%-30s %-12s %-14s\n' "端口" "最高采样率" "达配置上限?"
-  for p in $DIR_PORTS; do
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     b="$(mix_at "$POLICY" "$p")"
     printf '%-30s %-12s %-14s\n' "mixPort:$p" "$(printf '%s\n' "$b" | max_rate_of)" \
       "$(printf '%s\n' "$b" | has_rate x "${CONFIG_MAX:-0}")"
-  done
-  for p in $MIX_PORTS; do
+  done <<EOF
+$DIR_PORTS
+EOF
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     b="$(mix_at "$POLICY" "$p")"
     printf '%-30s %-12s %-14s\n' "mixPort:$p(混音)" "$(printf '%s\n' "$b" | max_rate_of)" \
       "$(printf '%s\n' "$b" | has_rate x "${CONFIG_MAX:-0}")"
-  done
-  for p in $USB_PORTS $WIRED_PORTS; do
+  done <<EOF
+$MIX_PORTS
+EOF
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     b="$(dev_at "$POLICY" "$p")"
     printf '%-30s %-12s %-14s\n' "dev:$p" "$(printf '%s\n' "$b" | max_rate_of)" \
       "$(printf '%s\n' "$b" | has_rate x "${CONFIG_MAX:-0}")"
-  done
+  done <<EOF
+$USB_PORTS
+$WIRED_PORTS
+EOF
 
   printf '\n小尾巴/耳机端口的位深（已去掉注释，只算真正生效的）：\n'
-  for p in $USB_PORTS $WIRED_PORTS; do
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     b="$(dev_at "$POLICY" "$p")"
     live="$(printf '%s\n' "$b" | live_pcms)"
     [ -n "$live" ] || live="$(printf '%s\n' "$b" | live_fmts)"
@@ -459,14 +488,20 @@ if [ -n "$POLICY" ]; then
               fi ;;
       esac
     fi
-  done
+  done <<EOF
+$USB_PORTS
+$WIRED_PORTS
+EOF
   # the highest live bit depth on the USB path is the reference the HAL will
   # pack a FLOAT / higher-bit stream into
   USB_POLICY_BITS=0
-  for p in $USB_PORTS; do
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     n="$(dev_at "$POLICY" "$p" | bits_of_port)"
     [ "${n:-0}" -gt "$USB_POLICY_BITS" ] 2>/dev/null && USB_POLICY_BITS="$n"
-  done
+  done <<EOF
+$USB_PORTS
+EOF
 else
   printf '跳过\n'
 fi
@@ -486,7 +521,11 @@ else
     "$(wc -l < "$DUMPF" 2>/dev/null)" "$DUMPF"
   printf 'Config source : %s\n' "$(cat "$DUMPF" | sed -n 's/^ *Config source: *//p' | head -n1)"
 
-  for p in $DIR_PORTS $MIX_PORTS "$(printf '%s' $USB_PORTS | cut -d' ' -f1)"; do
+  # DIR + MIX + the first USB port.  The "first USB port" used to be
+  # `printf '%s' $USB_PORTS | cut -d' ' -f1`, which split on a SPACE and then
+  # glued the words back together ("USBDeviceOutUSBHeadsetOut").  Take the
+  # first LINE of the newline-separated list instead.
+  while IFS= read -r p; do
     [ -n "$p" ] || continue
     dmax="$(cat "$DUMPF" \
       | awk -v nm="\"$p\"" '$0 ~ nm {f=1} f && /";[[:space:]]*0x/ && $0 !~ nm {exit} f' \
@@ -504,19 +543,34 @@ else
         fi
       fi
     fi
-  done
+  done <<EOF
+$DIR_PORTS
+$MIX_PORTS
+$(printf '%s\n' "$USB_PORTS" | sed -n '1p')
+EOF
 
   printf '\nUSB 输出端口的运行时能力（位深真正生效的地方）：\n'
-  cat "$DUMPF" | awk -v names="$USB_PORTS" '
-    BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) want["\"" a[i] "\""] = 1 }
-    /Port ID: *[0-9]+; "/ { u = 0; for (k in want) if (index($0, k) > 0) u = 1 }
-    u && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/ && !/Port ID: *[0-9]+; "/ { u = 0 }
-    u && (n2 = 1) { print "      " $0 }
-  ' 2>/dev/null | head -n 28
+  # The port names go to awk through a FILE, not through `-v names="..."`.
+  # Android's /system/bin/awk rejects a newline inside a -v assignment
+  # ("awk: newline in string"), and the names must stay one-per-line to survive
+  # names like "USB Device Out".
+  printf '%s\n' "$USB_PORTS" | grep -v '^$' > "$PORT_MAP.usb" 2>/dev/null
+  awk -v nf="$PORT_MAP.usb" '
+    BEGIN { while ((getline ln < nf) > 0) if (ln != "") want["\"" ln "\""] = 1 }
+    # Scope the scan to the "Available output devices" section.  A wanted name
+    # ("USB Headset Out") also appears later, inside the per-mixPort profile
+    # dumps, so without this bound the block ran on and reprinted those under a
+    # heading that promises output-device capabilities.
+    /^[[:space:]]*Available output devices/ { av = 1; next }
+    /^[[:space:]]*Available input devices/  { av = 0; u = 0; next }
+    av && /Port ID: *[0-9]+; "/ { u = 0; for (k in want) if (index($0, k) > 0) u = 1 }
+    av && u && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/ && !/Port ID: *[0-9]+; "/ { u = 0 }
+    av && u && (n2 = 1) { print "      " $0 }
+  ' "$DUMPF" 2>/dev/null | head -n 28
 
   printf '\n"可用输出设备"里的 USB 声卡（有它才说明小尾巴被系统认到）：\n'
-  cat "$DUMPF" | awk -v names="$USB_PORTS" '
-    BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) want["\"" a[i] ";"] = 1 }
+  awk -v nf="$PORT_MAP.usb" '
+    BEGIN { while ((getline ln < nf) > 0) if (ln != "") want["\"" ln "\";"] = 1 }
     /Available output devices/ { av = 1 }
     av && /Available input devices/ { av = 0 }
     av {
@@ -526,7 +580,8 @@ else
       if (u && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/) u = 0
       if (u) print "  " $0
     }
-  ' 2>/dev/null
+  ' "$DUMPF" 2>/dev/null
+  rm -f "$PORT_MAP.usb" 2>/dev/null
 fi
 D_DUMP_OK=no; [ -s "$DUMPF" ] && D_DUMP_OK=yes
 rm -f "$DUMPF" 2>/dev/null
@@ -572,7 +627,7 @@ if [ -z "$FOUND_USB_CARD" ]; then
   printf '     但 dumpsys 里仍可能残留它的描述符 —— 下面 4b 段的绑定情况可判定。\n'
   printf '  2) USB-C 接触不良 / 没插到底 / 转接头不合规，设备没枚举成功。\n'
   printf '  3) 该耳机是【模拟】Type-C 或 3.5mm（吃手机自带 codec，走 WIRED 通道），\n'
-  printf '     本来就不会出现在这里。本机 WIRED 端口：%s\n' "${WIRED_PORTS:-无}"
+  printf '     本来就不会出现在这里。本机 WIRED 端口：%s\n' "$(ports_disp "$WIRED_PORTS" 无)"
 fi
 
 # -------------------------------- 4b. kernel side: who owns the USB audio ifaces
@@ -738,8 +793,12 @@ bits_of_fmt() {
 # channel name -- resolved against THIS phone's port names, not a fixed list
 chan_of() {
   p="$1"
-  for d in $DIR_PORTS;  do [ "$d" = "$p" ] && { printf '直通 %s' "$p"; return; } done
-  for d in $MIX_PORTS;  do [ "$d" = "$p" ] && { printf '混音 %s' "$p"; return; } done
+  while IFS= read -r d; do [ "$d" = "$p" ] && { printf '直通 %s' "$p"; return; }; done <<EOF
+$DIR_PORTS
+EOF
+  while IFS= read -r d; do [ "$d" = "$p" ] && { printf '混音 %s' "$p"; return; }; done <<EOF
+$MIX_PORTS
+EOF
   case "$p" in
     *hifi*|*HiFi*) printf 'HiFi 通道 %s' "$p"; return ;;
   esac
@@ -790,8 +849,12 @@ else
   USB_ACTIVE_N="$(awk '/Global active count: [1-9]/{n++} END{print n+0}' "$USBF" 2>/dev/null)"
   case "$USB_ACTIVE_N" in ''|*[!0-9]*) USB_ACTIVE_N=0 ;; esac
 
-  for d in $DIR_PORTS; do grep -q "\"$d\"" "$USBF_ACTIVE" 2>/dev/null && USB_DIRECT=yes; done
-  for m in $MIX_PORTS; do grep -q "\"$m\"" "$USBF_ACTIVE" 2>/dev/null && USB_MIXED=yes; done
+  while IFS= read -r d; do [ -n "$d" ] && grep -q "\"$d\"" "$USBF_ACTIVE" 2>/dev/null && USB_DIRECT=yes; done <<EOF
+$DIR_PORTS
+EOF
+  while IFS= read -r m; do [ -n "$m" ] && grep -q "\"$m\"" "$USBF_ACTIVE" 2>/dev/null && USB_MIXED=yes; done <<EOF
+$MIX_PORTS
+EOF
   grep -q 'hifi' "$USBF_ACTIVE" 2>/dev/null && USB_HIFI=yes
 
   # ----------------------------------------------------------------- 5b+
@@ -932,14 +995,14 @@ else
     printf '      想回到 Android 音频栈：关掉播放器的独占开关，然后拔插一次小尾巴。\n'
   elif [ "$USB_ACTIVE_N" -gt 0 ] 2>/dev/null; then
     if [ "$USB_DIRECT" = yes ]; then
-      printf '    ✓ 有活动输出走【直通 %s】送往小尾巴 —— 模块策略在链路上。\n' "${DIR_PORTS:-direct}"
+      printf '    ✓ 有活动输出走【直通 %s】送往小尾巴 —— 模块策略在链路上。\n' "$(ports_disp "$DIR_PORTS" direct)"
       printf '      此时位深/采样率看 D3 明细（有流时）或输出记录里的协商格式。\n'
     elif [ "$USB_HIFI" = yes ]; then
       printf '    ✓ 有活动输出走【hifi 专用输出】送往小尾巴 —— 这是厂商为高解析 AudioTrack\n'
       printf '      开的专用输出，能力按 DAC 动态上报协商。输出记录里的 AUDIO_FORMAT/采样率\n'
       printf '      就是真实送达小尾巴的规格（如 24_BIT_PACKED; 96000 = 24bit/96k）。\n'
     elif [ "$USB_MIXED" = yes ]; then
-      printf '    ▲ 有活动输出走【混音路径 %s】送往小尾巴：\n' "${MIX_PORTS:-deep_buffer/low_latency}"
+      printf '    ▲ 有活动输出走【混音路径 %s】送往小尾巴：\n' "$(ports_disp "$MIX_PORTS" deep_buffer/low_latency)"
       printf '      混音路径的位深与采样率由【App 自己的 AudioTrack 请求】决定 ——\n'
       printf '      App 申请 16bit/48k 就只会是 16bit/48k，这不是模块能改的。\n'
       printf '      模块对混音路径的作用只是"混音率对齐免重采样"，给不了 24bit。\n'
@@ -1097,7 +1160,9 @@ else
   printf '配置层 : 补丁【未】挂载 —— 先应用或重启，其余判断都不成立\n'
 fi
 printf '端口   : USB[%s] WIRED[%s] DIRECT[%s] MIX[%s] SPK[%s]\n' \
-       "${USB_PORTS:-无}" "${WIRED_PORTS:-无}" "${DIR_PORTS:-无}" "${MIX_PORTS:-无}" "${SPK_PORTS:-无}"
+       "$(ports_disp "$USB_PORTS" 无)" "$(ports_disp "$WIRED_PORTS" 无)" \
+       "$(ports_disp "$DIR_PORTS" 无)" "$(ports_disp "$MIX_PORTS" 无)" \
+       "$(ports_disp "$SPK_PORTS" 无)"
 
 # ⑤ 详细展开: 列出扬声器端口在补丁里的 profile, 让上面的 ⑤ 一行可对照
 if [ "$SPK_PORT_SCAN" = "yes" ] && [ -n "$SPK_INFO" ]; then
@@ -1120,7 +1185,7 @@ if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
   printf '         音乐 bit-perfect 直连 DAC，本模块与它无关；dumpsys 的活动输出是幽灵路由，别看它\n'
 elif [ "${USB_ACTIVE_N:-0}" -gt 0 ] 2>/dev/null; then
   if [ "${USB_DIRECT:-no}" = yes ]; then
-    printf 'USB 侧 : 有活动输出走【直通 %s】→ 模块在链路上（5b 原文即证据）\n' "${DIR_PORTS:-direct}"
+    printf 'USB 侧 : 有活动输出走【直通 %s】→ 模块在链路上（5b 原文即证据）\n' "$(ports_disp "$DIR_PORTS" direct)"
   elif [ "${USB_HIFI:-no}" = yes ]; then
     printf 'USB 侧 : 有活动输出走【hifi 专用输出】→ 按 DAC 动态能力协商（见 5c 说明）\n'
   elif [ "${USB_MIXED:-no}" = yes ]; then
@@ -1159,29 +1224,123 @@ else
 fi
 # ---- BIT_PERFECT channel verdict (read-only): Android 14+ AudioFlinger
 # spins a dedicated output thread for a player that requested bit-perfect
-# output through the preferred mixer attributes API.  In dumpsys
-# media.audio_flinger such a thread shows type 7 / BitPerfect; the policy
-# side (our hifi_output port) only DECLARES the possibility.
+# output through the preferred mixer attributes API.
+#
+# Reading that state out of `dumpsys media.audio_flinger` is subtle.  The
+# track table prints a column NAMED "BitPerfect":
+#
+#   Type  Id Active Client(pid/uid) ... Flushed BitPerfect InternalMute Latency
+#
+# but a real track row never repeats the column NAME -- it only carries the
+# VALUE, a bare true/false:
+#
+#                56  no  14563/1041 ... false 00000000 20070 0 I 0 0 false false new
+#
+# AudioFlinger re-prints that header once per thread AND once per "Local log:"
+# section, so grepping for "BitPerfect" counts headers, not tracks: on a phone
+# with zero bit-perfect playout it reported "9 条 BitPerfect 线程 ✅ 生效".
+# We therefore (1) drop the header rows, (2) require the row to carry a real
+# pid/uid pair, (3) take the boolean immediately before InternalMute -- the
+# row's tail is "PortMuted BitPerfect InternalMute", oldest layouts drop
+# PortMuted/InternalMute and leave BitPerfect as the only boolean.
+BP_DATA_ROW_AWK='
+  /BitPerfect[ \t]+InternalMute/ { next }              # the column-name header
+  /Client\(pid\/uid\)/           { next }              # any other header spelling
+  $0 !~ /[0-9][0-9]*[ \t]*\/[ \t]*[0-9]/ { next }      # needs a real pid/uid
+  {
+    n = split($0, f, /[ \t]+/)
+    nb = 0; prev = ""; last = ""
+    for (i = 1; i <= n; i++)
+      if (f[i] == "true" || f[i] == "false") { prev = last; last = f[i]; nb++ }
+    if (nb == 0) next
+    bpv = (nb == 1) ? last : prev
+    if (bpv == "true") c++
+  }
+  END { print c + 0 }
+'
+# HIFI_FAKE_FLINGER: offline self-test hook -- read the dump from this file
+# instead of spawning dumpsys (same convention as HIFI_FAKE_* above).
 BPF=/data/local/tmp/.hifi_probe_dump_flinger.txt
-dumpsys media.audio_flinger > "$BPF" 2>/dev/null
-BP_THR_N="$(grep -cE 'BitPerfect|type *[:=] *7([ ,]|$)' "$BPF" 2>/dev/null)"
-case "$BP_THR_N" in ''|*[!0-9]*) BP_THR_N=0 ;; esac
-rm -f "$BPF" 2>/dev/null
-if [ "$BP_THR_N" -gt 0 ] 2>/dev/null; then
-  printf '\n⑤b BIT_PERFECT : ✅ 生效 —— AudioFlinger 正在运行 BitPerfect 输出线程（%s 条，dumpsys media.audio_flinger 为证）\n' "$BP_THR_N"
+BPF_TMP=yes
+if [ -n "${HIFI_FAKE_FLINGER:-}" ]; then
+  BPF="$HIFI_FAKE_FLINGER"
+  BPF_TMP=no
 else
-  BP_DECL=no
-  if [ -r "$TGT" ]; then
-    while IFS='|' read -r bp_live bp_patched bp_stk; do
-      [ -n "$bp_patched" ] || continue
-      grep -q 'name="hifi_output"' "$bp_patched" 2>/dev/null && { BP_DECL=yes; break; }
-    done < "$TGT"
-  fi
-  if [ "$BP_DECL" = yes ]; then
-    printf '\n⑤b BIT_PERFECT : ⚪ 已声明未激活 —— 策略里已有 hifi_output 通道，但此刻没有 BitPerfect 线程在跑（播放器未用 preferred mixer attributes API 请求，或方言不支持）\n'
+  dumpsys media.audio_flinger > "$BPF" 2>/dev/null
+fi
+BP_THR_N="$(awk "$BP_DATA_ROW_AWK" "$BPF" 2>/dev/null)"
+case "$BP_THR_N" in ''|*[!0-9]*) BP_THR_N=0 ;; esac
+[ "$BPF_TMP" = yes ] && rm -f "$BPF" 2>/dev/null
+
+# Which dialect is this phone?  Same rule as bin/hifi's dialect_of(): strip XML
+# comments, then the file is QTI/AIDL when pcmType= outnumbers
+# format="AUDIO_FORMAT_; HIDL/AOSP otherwise.  BIT_PERFECT is an AIDL-only
+# feature (Android officially supports the flag on the AIDL audio HAL), so on a
+# HIDL device this verdict is simply not applicable -- it must never print
+# "生效" no matter what dumpsys happens to contain.
+bp_dialect_of() {
+  awk '
+    { ln = $0
+      while (1) {
+        p = index(ln, "<!--")
+        if (p == 0) break
+        q = index(substr(ln, p), "-->")
+        if (q == 0) { ln = substr(ln, 1, p - 1); break }
+        ln = substr(ln, 1, p - 1) substr(ln, p + q + 2)
+      }
+      if (ln ~ /pcmType="/) qti++
+      else if (ln ~ /format="AUDIO_FORMAT_/) aosp++
+    }
+    END {
+      if (qti == 0 && aosp == 0) exit 3
+      print (qti >= aosp) ? "qti" : "aosp"
+    }' "$1" 2>/dev/null
+}
+
+BP_DIA=""
+if [ -r "$TGT" ]; then
+  while IFS='|' read -r bp_live bp_patched bp_stk; do
+    [ -n "$bp_live" ] || continue
+    case "$bp_live" in *.so) continue ;; esac
+    [ -r "$bp_stk" ] || continue
+    BP_DIA="$(bp_dialect_of "$bp_stk")"
+    [ -n "$BP_DIA" ] && break
+  done < "$TGT"
+fi
+if [ -z "$BP_DIA" ]; then
+  for bp_f in $POLICY_FILES; do
+    case "$bp_f" in *.so) continue ;; esac
+    bp_real="${POLICY_ROOT:-}${bp_f}"
+    [ -r "$bp_real" ] || continue
+    BP_DIA="$(bp_dialect_of "$bp_real")"
+    [ -n "$BP_DIA" ] && break
+  done
+fi
+
+# Did the policy side actually DECLARE the channel?  Our hifi_output mixPort is
+# the precondition: without it the framework can never hand a player a
+# bit-perfect output, so "生效" would be a lie even if a dump looked right.
+BP_DECL=no
+if [ -r "$TGT" ]; then
+  while IFS='|' read -r bp_live bp_patched bp_stk; do
+    [ -n "$bp_patched" ] || continue
+    grep -q 'name="hifi_output"' "$bp_patched" 2>/dev/null && { BP_DECL=yes; break; }
+  done < "$TGT"
+fi
+
+if [ "${BP_DIA:-}" != qti ]; then
+  printf '\n⑤b BIT_PERFECT : ⚪ 不适用（HIDL 方言，Android 官方仅 AIDL 支持 BIT_PERFECT）'
+  if [ -n "${BP_DIA:-}" ]; then
+    printf ' —— 本机策略方言判定为 %s，无论 dumpsys 里出现什么都与此项无关\n' "$BP_DIA"
   else
-    printf '\n⑤b BIT_PERFECT : ⚪ 未激活（策略未声明 hifi_output，或播放器未请求；BIT_PERFECT=1 时仅 AIDL 方言生效）\n'
+    printf ' —— 本机没有可判定的策略文件（或策略方言未知）\n'
   fi
+elif [ "$BP_DECL" != yes ]; then
+  printf '\n⑤b BIT_PERFECT : ⚪ 未声明 —— 策略里没有 hifi_output 通道（BIT_PERFECT=1 时为 AIDL 机型声明该通道，未声明则播放器无法请求）\n'
+elif [ "$BP_THR_N" -gt 0 ] 2>/dev/null; then
+  printf '\n⑤b BIT_PERFECT : ✅ 生效 —— AudioFlinger 正在运行 BitPerfect 输出线程（真实数据行 %s 条，dumpsys media.audio_flinger 为证）\n' "$BP_THR_N"
+else
+  printf '\n⑤b BIT_PERFECT : ⚪ 已声明未激活 —— 策略里已有 hifi_output 通道，但此刻没有 BitPerfect 真实数据行在跑（播放器未用 preferred mixer attributes API 请求；dumpsys 表格列标题不算）\n'
 fi
 
 printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
