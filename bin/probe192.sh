@@ -217,6 +217,88 @@ case "${CONFIG_BITS:-32}" in
   *)  WANT_N=3 ;;
 esac
 
+# ==================================== 0. v2.0.0 knobs: spkdsp + boot safety net
+# Two features shipped in v2.0.0 had NO deep check in this report:
+#   * SPK_DSP_BITS (WP1) only ever showed up as one bare line in the summary.
+#   * the P0 boot safety net (P0-1 timeout / P0-2 circuit breaker / P0-3 first
+#     boot / P0-4 unhealthy unmount) was completely invisible.
+# Both are pure READS of $STATE and of one system property -- nothing here
+# touches the audio stack, and nothing here writes.
+#
+# Fail-safe inputs, so the offline self-test can drive every branch:
+#   * the state files are read through HIFI_STATE_DIR (boot_degraded /
+#     bootfail.count / firstboot_done / config.conf / last.log)
+#   * the live property comes from `getprop` on PATH
+#   * HIFI_FAKE_BOOTLOG points the boot-verify history at any file instead of
+#     $STATE/last.log -- the same idea as HIFI_FAKE_FLINGER, so a user's pulled
+#     log can be replayed here without root.
+if want_core; then
+P0_BOOTLOG="${HIFI_FAKE_BOOTLOG:-$STATE/last.log}"
+
+# ---- P0 boot safety net ----------------------------------------------------
+# Same three states `hifi bootmode` prints, computed here without exec'ing the
+# controller: the probe must stay a standalone, read-only tool.
+P0_MODE=normal
+P0_MODE_SHORT="✅ normal —— boot 安全网就绪（8s 超时自保 + 不健康自动卸载）"
+if [ -e "$STATE/boot_degraded" ]; then
+  P0_MODE=degraded
+  P0_MODE_SHORT="⚠️ degraded —— 上次开机 8s 超时自保（P0-1），本次挂载已被跳过"
+elif [ ! -e "$STATE/firstboot_done" ]; then
+  P0_MODE=discover-only
+  P0_MODE_SHORT="⚪ discover-only —— 首启只准备、未挂载（P0-3），重启后生效"
+fi
+
+P0_BF_N=""
+[ -r "$STATE/bootfail.count" ] && P0_BF_N="$(head -n1 "$STATE/bootfail.count" 2>/dev/null | tr -d '[:space:]')"
+case "$P0_BF_N" in ''|*[!0-9]*) P0_BF_N=0 ;; esac
+P0_EN="$(sed -n 's/^ENABLED=//p' "$CONFIG" 2>/dev/null | head -n1)"
+
+if [ -e "$STATE/firstboot_done" ]; then
+  P0_FB_TXT="有 —— 首启的 prepare-only 阶段已经走完"
+else
+  P0_FB_TXT="无 —— 还是首启状态，补丁已生成但尚未挂载（重启一次即生效）"
+fi
+if [ -e "$STATE/boot_degraded" ]; then
+  P0_DG_TXT="有（P0-1：上次开机 post-fs-data 的 8s 超时自保生效，本次挂载被自动跳过）"
+else
+  P0_DG_TXT="无（本次开机没有触发 8s 超时自保）"
+fi
+if [ "$P0_BF_N" = 0 ]; then
+  P0_BF_TXT="无记录 / 0 —— 没有连续不健康开机（熔断未触发）"
+elif [ "$P0_BF_N" -ge 2 ] 2>/dev/null; then
+  P0_BF_TXT="${P0_BF_N} —— ⚠️ 已达熔断线：计数达标时 service.sh 会关闭自启（ENABLED=0，P0-2）"
+else
+  P0_BF_TXT="${P0_BF_N} —— 未熔断（连续 2 次才会关闭自启）"
+fi
+
+# Is the late_start safety net actually running?  service.sh appends one
+# "boot verify: ..." line to $STATE/last.log on every path it takes, so the
+# newest such line is the direct evidence.
+P0_BV_LAST=""
+P0_BV_N=0
+if [ -r "$P0_BOOTLOG" ]; then
+  P0_BV_LAST="$(grep 'boot verify:' "$P0_BOOTLOG" 2>/dev/null | tail -n1)"
+  P0_BV_N="$(grep -c 'boot verify:' "$P0_BOOTLOG" 2>/dev/null)"
+fi
+case "$P0_BV_N" in ''|*[!0-9]*) P0_BV_N=0 ;; esac
+if [ -z "$P0_BV_LAST" ]; then
+  if [ -r "$P0_BOOTLOG" ]; then
+    P0_SA_TXT="⚠️ 读到了 last.log，但里面没有 boot verify 记录 —— service.sh 可能从未跑到那一步"
+  else
+    P0_SA_TXT="⚪ 读不到 $P0_BOOTLOG（尚未生成或不可读）—— 无法确认 late_start 是否跑过"
+  fi
+else
+  P0_SA_TXT="✅ 已记录 ${P0_BV_N} 次 boot verify，最后一次：${P0_BV_LAST}"
+fi
+P0_BREAK_N="$(grep -c 'BOOTFAIL-CIRCUIT-BREAK' "$P0_BOOTLOG" 2>/dev/null)"
+case "$P0_BREAK_N" in ''|*[!0-9]*) P0_BREAK_N=0 ;; esac
+if [ "$P0_BF_N" -ge 2 ] 2>/dev/null || [ "$P0_EN" = 0 ]; then
+  P0_RECOVER="需要：hifi set enabled 1 && hifi apply（重新开启并立即重挂；计数在成功 apply 后清零）"
+else
+  P0_RECOVER="无需操作（自启开启，熔断未触发）"
+fi
+fi   # want_core ->  section-7 helpers (spkdsp verdict + P0 state)
+
 # ==================================================== 1. module and policy files
 if want_core; then
 sec 1 "模块与生效中的策略文件"
@@ -1146,6 +1228,7 @@ printf '%s\n' "② 音频客户端 : $CLIENT_LINE"
 printf '%s\n' "③ 实际输出   : $OUTPUT_LINE"
 printf '%s\n' "④ 判定       : $VERDICT_LINE"
 printf '%s\n' "⑤ 扬声器档位 : ${SPK_VERDICT:-未校验（扬声器端口不存在或模块未挂载）}"
+printf '%s\n' "⑥ P0 开机安全网 : ${P0_MODE_SHORT}"
 printf '%s\n' "=============================================="
 printf '%s\n' ""
 printf '%s\n' "---- 排查明细（遇到问题把下面整段附在 issue 里）----"
@@ -1159,6 +1242,10 @@ printf '端口   : USB[%s] WIRED[%s] DIRECT[%s] MIX[%s] SPK[%s]\n' \
        "$(ports_disp "$USB_PORTS" 无)" "$(ports_disp "$WIRED_PORTS" 无)" \
        "$(ports_disp "$DIR_PORTS" 无)" "$(ports_disp "$MIX_PORTS" 无)" \
        "$(ports_disp "$SPK_PORTS" 无)"
+
+# ⑥ 详细展开: P0 开机安全网状态（bootmode / bootfail 熔断计数 / degraded 标记）
+printf 'P0 安全网 : mode=%s · bootfail=%s · degraded=%s\n' \
+  "${P0_MODE}" "${P0_BF_N:-0}" "$([ -e "$STATE/boot_degraded" ] && echo 有 || echo 无)"
 
 # ⑤ 详细展开: 列出扬声器端口在补丁里的 profile, 让上面的 ⑤ 一行可对照
 if [ "$SPK_PORT_SCAN" = "yes" ] && [ -n "$SPK_INFO" ]; then
