@@ -220,6 +220,118 @@ case "${CONFIG_BITS:-32}" in
   *)  WANT_N=3 ;;
 esac
 
+# ==================================== 0. v2.0.0 knobs: spkdsp + boot safety net
+# Two features shipped in v2.0.0 had NO deep check in this report:
+#   * SPK_DSP_BITS (WP1) only ever showed up as one bare line in the summary.
+#   * the P0 boot safety net (P0-1 timeout / P0-2 circuit breaker / P0-3 first
+#     boot / P0-4 unhealthy unmount) was completely invisible.
+# Both are pure READS of $STATE and of one system property -- nothing here
+# touches the audio stack, and nothing here writes.
+#
+# Fail-safe inputs, so the offline self-test can drive every branch:
+#   * the state files are read through HIFI_STATE_DIR (boot_degraded /
+#     bootfail.count / firstboot_done / config.conf / last.log)
+#   * the live property comes from `getprop` on PATH
+#   * HIFI_FAKE_BOOTLOG points the boot-verify history at any file instead of
+#     $STATE/last.log -- the same idea as HIFI_FAKE_FLINGER, so a user's pulled
+#     log can be replayed here without root.
+if want_core; then
+P0_BOOTLOG="${HIFI_FAKE_BOOTLOG:-$STATE/last.log}"
+
+# ---- SPK_DSP_BITS : config vs. the live persist.* property ------------------
+# 16 = off  -> `hifi apply` injects nothing (a value left on the system is only
+#              cleared by `hifi restore`)
+# 24/32     -> apply does `setprop persist.vendor.audio_hal.dsp_bit_width_
+#              enforce_mode <n>`; service.sh re-asserts it once per healthy boot
+SPK_DSP_WANT="$CONFIG_SPKDSP"
+case "$SPK_DSP_WANT" in 16|24|32) ;; *) SPK_DSP_WANT=16 ;; esac
+SPK_DSP_LIVE="${CONFIG_DSPBITS:-}"
+case "$SPK_DSP_LIVE" in ''|*[!0-9]*) SPK_DSP_LIVE="" ;; esac
+SPK_DSP_VERDICT=""
+SPK_DSP_HINT=""
+if [ "$SPK_DSP_WANT" = 16 ]; then
+  if [ -n "$SPK_DSP_LIVE" ]; then
+    SPK_DSP_VERDICT="⚪ 已关闭（期望 16 = 不注入）"
+    SPK_DSP_HINT="但系统上仍残留 ${SPK_DSP_LIVE} —— 只有 hifi restore 会清除它，音频 HAL 重启前它依然生效"
+  else
+    SPK_DSP_VERDICT="⚪ 已关闭（期望 16 = 不注入，属性为空）"
+    SPK_DSP_HINT="原厂 ADSP 位宽，模块未插手"
+  fi
+elif [ -z "$SPK_DSP_LIVE" ]; then
+  SPK_DSP_VERDICT="⚠️ 未注入 —— 期望 ${SPK_DSP_WANT}，live 属性为空"
+  SPK_DSP_HINT="hifi apply 会写入；service.sh 也会在下次健康开机时幂等补一次"
+elif [ "$SPK_DSP_LIVE" = "$SPK_DSP_WANT" ]; then
+  SPK_DSP_VERDICT="✅ 已注入 —— live=${SPK_DSP_LIVE} = 期望 ${SPK_DSP_WANT}"
+  SPK_DSP_HINT="属性已写好；是否真正被采纳由 ROM 的 audio HAL 决定（见下）"
+else
+  SPK_DSP_VERDICT="⚠️ 不符 —— live=${SPK_DSP_LIVE} ≠ 期望 ${SPK_DSP_WANT}"
+  SPK_DSP_HINT="hifi apply 会按配置重设；刚改过配置时重启音频 HAL / 重启手机才生效"
+fi
+
+# ---- P0 boot safety net ----------------------------------------------------
+# Same three states `hifi bootmode` prints, computed here without exec'ing the
+# controller: the probe must stay a standalone, read-only tool.
+P0_MODE=normal
+P0_MODE_SHORT="✅ normal —— boot 安全网就绪（8s 超时自保 + 不健康自动卸载）"
+if [ -e "$STATE/boot_degraded" ]; then
+  P0_MODE=degraded
+  P0_MODE_SHORT="⚠️ degraded —— 上次开机 8s 超时自保（P0-1），本次挂载已被跳过"
+elif [ ! -e "$STATE/firstboot_done" ]; then
+  P0_MODE=discover-only
+  P0_MODE_SHORT="⚪ discover-only —— 首启只准备、未挂载（P0-3），重启后生效"
+fi
+
+P0_BF_N=""
+[ -r "$STATE/bootfail.count" ] && P0_BF_N="$(head -n1 "$STATE/bootfail.count" 2>/dev/null | tr -d '[:space:]')"
+case "$P0_BF_N" in ''|*[!0-9]*) P0_BF_N=0 ;; esac
+P0_EN="$(sed -n 's/^ENABLED=//p' "$CONFIG" 2>/dev/null | head -n1)"
+
+if [ -e "$STATE/firstboot_done" ]; then
+  P0_FB_TXT="有 —— 首启的 prepare-only 阶段已经走完"
+else
+  P0_FB_TXT="无 —— 还是首启状态，补丁已生成但尚未挂载（重启一次即生效）"
+fi
+if [ -e "$STATE/boot_degraded" ]; then
+  P0_DG_TXT="有（P0-1：上次开机 post-fs-data 的 8s 超时自保生效，本次挂载被自动跳过）"
+else
+  P0_DG_TXT="无（本次开机没有触发 8s 超时自保）"
+fi
+if [ "$P0_BF_N" = 0 ]; then
+  P0_BF_TXT="无记录 / 0 —— 没有连续不健康开机（熔断未触发）"
+elif [ "$P0_BF_N" -ge 2 ] 2>/dev/null; then
+  P0_BF_TXT="${P0_BF_N} —— ⚠️ 已达熔断线：计数达标时 service.sh 会关闭自启（ENABLED=0，P0-2）"
+else
+  P0_BF_TXT="${P0_BF_N} —— 未熔断（连续 2 次才会关闭自启）"
+fi
+
+# Is the late_start safety net actually running?  service.sh appends one
+# "boot verify: ..." line to $STATE/last.log on every path it takes, so the
+# newest such line is the direct evidence.
+P0_BV_LAST=""
+P0_BV_N=0
+if [ -r "$P0_BOOTLOG" ]; then
+  P0_BV_LAST="$(grep 'boot verify:' "$P0_BOOTLOG" 2>/dev/null | tail -n1)"
+  P0_BV_N="$(grep -c 'boot verify:' "$P0_BOOTLOG" 2>/dev/null)"
+fi
+case "$P0_BV_N" in ''|*[!0-9]*) P0_BV_N=0 ;; esac
+if [ -z "$P0_BV_LAST" ]; then
+  if [ -r "$P0_BOOTLOG" ]; then
+    P0_SA_TXT="⚠️ 读到了 last.log，但里面没有 boot verify 记录 —— service.sh 可能从未跑到那一步"
+  else
+    P0_SA_TXT="⚪ 读不到 $P0_BOOTLOG（尚未生成或不可读）—— 无法确认 late_start 是否跑过"
+  fi
+else
+  P0_SA_TXT="✅ 已记录 ${P0_BV_N} 次 boot verify，最后一次：${P0_BV_LAST}"
+fi
+P0_BREAK_N="$(grep -c 'BOOTFAIL-CIRCUIT-BREAK' "$P0_BOOTLOG" 2>/dev/null)"
+case "$P0_BREAK_N" in ''|*[!0-9]*) P0_BREAK_N=0 ;; esac
+if [ "$P0_BF_N" -ge 2 ] 2>/dev/null || [ "$P0_EN" = 0 ]; then
+  P0_RECOVER="需要：hifi set enabled 1 && hifi apply（重新开启并立即重挂；计数在成功 apply 后清零）"
+else
+  P0_RECOVER="无需操作（自启开启，熔断未触发）"
+fi
+fi   # want_core ->  section-7 helpers (spkdsp verdict + P0 state)
+
 # ==================================================== 1. module and policy files
 if want_core; then
 sec 1 "模块与生效中的策略文件"
@@ -1149,7 +1261,10 @@ printf '%s\n' "② 音频客户端 : $CLIENT_LINE"
 printf '%s\n' "③ 实际输出   : $OUTPUT_LINE"
 printf '%s\n' "④ 判定       : $VERDICT_LINE"
 printf '%s\n' "⑤ 扬声器档位 : ${SPK_VERDICT:-未校验（扬声器端口不存在或模块未挂载）}"
-printf '%s\n' "⑥ DSP 位宽强制 : ${CONFIG_DSPBITS:-未设置}（期望 ${CONFIG_SPKDSP:-16}）"
+# ⑥ keeps its historical "live（期望 N）" shape and gains the verdict after it,
+# so both the raw values and the 已注入 / 未注入 / 不符 judgement are visible.
+printf '%s\n' "⑥ DSP 位宽强制 : ${CONFIG_DSPBITS:-未设置}（期望 ${SPK_DSP_WANT}）—— ${SPK_DSP_VERDICT}"
+printf '%s\n' "⑦ P0 开机安全网 : bootmode=${P0_MODE} · bootfail=${P0_BF_N} · boot_degraded=$([ -e "$STATE/boot_degraded" ] && echo 有 || echo 无)"
 printf '%s\n' "=============================================="
 printf '%s\n' ""
 printf '%s\n' "---- 排查明细（遇到问题把下面整段附在 issue 里）----"
@@ -1342,6 +1457,50 @@ elif [ "$BP_THR_N" -gt 0 ] 2>/dev/null; then
 else
   printf '\n⑤b BIT_PERFECT : ⚪ 已声明未激活 —— 策略里已有 hifi_output 通道，但此刻没有 BitPerfect 真实数据行在跑（播放器未用 preferred mixer attributes API 请求；dumpsys 表格列标题不算）\n'
 fi
+
+# ---- ⑦ P0 开机安全网 (v2.0.0) ----------------------------------------------
+# The safety net is what keeps a rejected patch from ending in a stuck boot
+# animation, so a doctor run that stays silent about it cannot answer "did the
+# safety net do its job?".  Everything below is read-only.
+printf '\n---- ⑦ P0 开机安全网（v2.0.0 防卡开机：状态目录 %s）----\n' "$STATE"
+printf 'bootmode    : %s\n' "$P0_MODE_SHORT"
+case "$P0_MODE" in
+  degraded)      printf '  含义      : 上次开机 post-fs-data 里的 boot 阶段超过 8s 没回来，post-fs-data.sh 记下\n              boot_degraded 并跳过本次挂载，先保住一台能用的手机（P0-1）。\n              下一次开机 service.sh 确认 audioserver 健康后会清掉这个标记并恢复挂载。\n' ;;
+  discover-only) printf '  含义      : 安装 / 升级后的首启只扫描并生成补丁、不挂载（P0-3），所以这一刻\n              报告里的「未挂载」是设计内行为，不是故障；重启一次即生效。\n' ;;
+  *)             printf '  含义      : boot 阶段按预期完成，安全网没有被触发。\n' ;;
+esac
+printf '标记        : boot_degraded  %s\n' "$P0_DG_TXT"
+printf '              firstboot_done %s\n' "$P0_FB_TXT"
+printf '熔断计数    : bootfail.count %s\n' "$P0_BF_TXT"
+if [ "$P0_BREAK_N" -gt 0 ] 2>/dev/null; then
+  printf '              last.log 里出现过 %s 次 BOOTFAIL-CIRCUIT-BREAK（历史记录，未必是本次状态）\n' "$P0_BREAK_N"
+fi
+printf '恢复方式    : %s\n' "$P0_RECOVER"
+printf 'late_start  : %s\n' "$P0_SA_TXT"
+printf '  说明      : bootmode 与熔断计数来自模块状态目录；「安全网是否真的在跑」由上面这行\n'
+printf '              boot verify 记录回答 —— 没有记录是 service.sh 没跑到，不等于已生效。\n'
+printf '  备注      : 本项与音频链路判定无关：degraded / discover-only 都是安全网按设计自保，\n'
+printf '              不会改变本段 ①..⑤ 对采样率与位深的结论。\n'
+
+# ---- ⑥ DSP 位宽强制 (SPK_DSP_BITS, v2.0.0 WP1) ------------------------------
+# One summary line (⑥) is not a check: it shows the raw property and the wanted
+# value, but never says whether they MATCH.  This block does, and it also
+# states the limit of what the module can guarantee.
+printf '\n---- ⑥ DSP 位宽强制（SPK_DSP_BITS → persist.vendor.audio_hal.dsp_bit_width_enforce_mode）----\n'
+printf '配置期望    : SPK_DSP_BITS=%s' "$SPK_DSP_WANT"
+case "$SPK_DSP_WANT" in
+  16)   printf '（16 = 关闭，apply 不注入任何属性）\n' ;;
+  24|32) printf '（apply 会 setprop %s）\n' "$SPK_DSP_WANT" ;;
+esac
+printf 'live 属性   : %s\n' "${CONFIG_DSPBITS:-（空 —— 没设过，或已被 restore 清除）}"
+printf '判定        : %s\n' "$SPK_DSP_VERDICT"
+printf '  下一步    : %s\n' "$SPK_DSP_HINT"
+printf '  服务侧    : service.sh 会在 audioserver 健康的分支里按 config 幂等补一次\n'
+printf '              （用于 HAL 先于 late_start 启动、首启读不到值的情况）\n'
+printf '  能力边界  : 这个属性是"请求"，不是"保证"。只有 ROM 的 audio HAL 自己去读\n'
+printf '              persist.vendor.audio_hal.dsp_bit_width_enforce_mode 时才会生效；\n'
+printf '              HAL 不读它（多数 AOSP / 部分厂商 HAL 就是这样）则本项无可闻效果，\n'
+printf '              模块没法从外部强制。真实的位宽以第 5 段协商结果为准。\n'
 
 printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
 printf '         不开独占时出现 ✅ 模块生效 / ✓ 直通 / ✓ HiFi 通道 = 模块在链路上正常干预；\n'
