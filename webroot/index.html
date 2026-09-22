@@ -71,71 +71,67 @@
 
     <div class="field">
       <label>全局混音采样率</label>
-      <p class="hint">系统混音器的工作频率。当它与音源一致时，AudioFlinger 会跳过自身重采样 —— 这是让<strong>所有 App</strong>都免于 SRC 的关键开关。默认档与原厂一致，最稳妥。</p>
+      <p class="hint">系统<strong>混音器工作频率</strong>：与音源一致时 AudioFlinger 不再重采样，让<strong>所有 App</strong>免于 SRC。<br>
+      <strong>怎么选</strong>：按曲库多数采样率 —— 44.1k 选 <strong>44.1 kHz（推荐）</strong>，48k 为主保持 48 kHz（原厂）；192 / 384 kHz 属升采样试听（<strong>实验</strong>）。</p>
       <div class="pills" id="pillMixer">
         <button class="pill" data-v="44100">44.1 kHz<em>44.1k 曲库免 SRC（推荐）</em></button>
         <button class="pill" data-v="48000">48 kHz<em>原厂默认</em></button>
         <button class="pill" data-v="192000">192 kHz<em>高倍升采样</em></button>
         <button class="pill" data-v="384000">384 kHz<em>拉满 · 高端机型</em></button>
       </div>
-      <p class="hint"><strong>注意：</strong>AudioPolicyManager 对<strong>混音输出</strong>取的是列表里的<strong>最大值</strong>，所以本模块会把混音端口重写成<strong>唯一</strong>一个你选的频率 —— 只往列表前面加一个 44.1k 是没用的，48k 仍然是最大值。请按曲库多数采样率选档。</p>
+      <p class="hint">换档<strong>把整个混音端口重写成你选的频率</strong>（框架取列表最大值，只加一项没用）；免 SRC 的前提是<strong>混音率 = 音源率</strong>。<br>
+      改完点「应用并生效」立即生效。</p>
     </div>
 
     <div class="field">
       <label>HiFi 直通上限</label>
-      <p class="hint">USB / 有线的 DIRECT 直通通道的最高采样率。按解码芯片的<strong>真实上限</strong>设置，不要盲目拉满。<br>
-      · CX31993 上限 <strong>384 kHz / 32-bit</strong>，配 MAX97220 耳放。<br>
-      · <strong>96 kHz / 24-bit</strong>：多数 96k 上限的数字小尾巴请选这一档。<br>
-      · 它真正的短板是<strong>位深</strong>：原厂通常只给 16bit，本模块补上 24/32bit 才是收益所在。</p>
+      <p class="hint">USB / 有线 <strong>DIRECT 直通通道</strong>允许的最高采样率，够高才能让独占输出的音源不被压到低率。<br>
+      <strong>怎么选</strong>：按小尾巴<strong>上报的真实上限</strong>选（上面「USB 解码器」一格可见）—— 384 kHz 是 CX31993 一类芯片的上限；只到 96 kHz 的选 <strong>96 kHz</strong>，别盲目拉满。</p>
       <div class="pills rates" id="pillMax"></div>
     </div>
 
     <div class="field">
       <label>HiFi 通道率（USB 实际通路）</label>
-      <p class="hint">接上小尾巴后，USB 音频<strong>不走混音器</strong>，而是走厂商的 HiFi 专用端口（如 <code>hifi_playback</code>）。它原厂是「动态」的，会被钉在<strong>小尾巴上报的最大率</strong>上，于是<strong>所有音源都被上采样</strong>、没有一条能比特完美。<br>
-      <strong>请按你正在听的音源手动选档</strong>：网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz</strong>；96k 母带选 <strong>96 kHz</strong>。选对档后，该率的内容<strong>比特完美</strong>；其余率的内容会被<strong>上采样</strong>（带限插值，不丢内容）。<br>
-      <strong>关键：永远不要往下选</strong> —— 锁定的率低于音源率会发生<strong>有损下采样</strong>（超声频段被滤掉）。<code>auto</code> = 原厂行为。</p>
+      <p class="hint">插上小尾巴后 USB 音频<strong>不走混音器</strong>，走厂商 HiFi 端口（如 <code>hifi_playback</code>）。<br>
+      <strong>怎么选</strong>：钉在<strong>你正在听的音源采样率</strong>上，该率即<strong>比特完美</strong> —— 网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz（推荐）</strong>，96k 母带选 96 kHz。<br>
+      其余率只会上采样、不丢内容，<strong>永远不要往下选</strong>（有损下采样）；<code>auto</code>＝原厂行为。</p>
       <div class="pills" id="pillHifi"></div>
     </div>
 
     <div class="field">
       <label>直通位深上限</label>
-      <p class="hint">USB / 有线输出端口允许的<strong>位深上限</strong>。16bit 永远保留作基线，所以这是"上限"而不是"唯一"：<br>
-      · <strong>16-bit</strong> = 只留 16bit（最保守，排查用）。<br>
-      · <strong>24-bit</strong> = 16 + 24bit。96k 上限的数字小尾巴选这一档。<br>
-      · <strong>32-bit</strong> = 16 + 24 + 32bit，最宽松，默认。<br>
-      设为高于解码器能力的位深可能导致无声。</p>
+      <p class="hint">USB / 有线输出端口的<strong>位深上限</strong>：原厂常只给 16bit，补齐到 24 / 32bit 后 Hi-Res 音源才不被截位（16bit 始终保留）。<br>
+      <strong>怎么选</strong>：解码器能收 24bit 就选 <strong>24-bit（推荐）</strong>，确定支持 32bit 才选 32-bit；<strong>16-bit</strong>＝最保守基线（<strong>实验</strong>）。<br>
+      选高于解码器能力可能<strong>无声</strong>。</p>
       <div class="pills" id="pillBits"></div>
     </div>
 
     <div class="field">
       <label>扬声器采样率档位</label>
-      <p class="hint">手机<strong>扬声器 / 听筒</strong>输出端口的采样率。原厂通常锁在 48 kHz：播放 44.1 kHz 音乐时会被系统重采样到 48 kHz。钉死为曲库采样率可让扬声器回放也免于 SRC。<br>
-      · <strong>auto</strong> = 原厂行为（推荐，最稳妥）。<br>
-      · 选定档位后，扬声器端口只保留该采样率 —— 其余率的音源会被上采样（不丢内容），<strong>永远不要往下选</strong>。</p>
+      <p class="hint">手机<strong>扬声器 / 听筒</strong>端口的采样率：钉死为曲库采样率后，扬声器回放<strong>也免于 SRC</strong>（原厂常锁 48 kHz，播 44.1k 会先被重采样）。<br>
+      <strong>怎么选</strong>：44.1k 曲库选 <strong>44.1 kHz（推荐，配「扬声器一键优化」）</strong>，其他情况保留 <strong>auto</strong>＝原厂；不要往下选（有损下采样）。</p>
       <div class="pills" id="pillSpk"></div>
     </div>
 
     <div class="field">
       <label>扬声器位深上限</label>
-      <p class="hint">扬声器 / 听筒端口允许的<strong>位深上限</strong>。手机内置 DAC 多为 24bit 能力，但原厂策略常只声明 16bit。<br>
-      · <strong>16-bit</strong> = 保持原厂（默认，最保守）。<br>
-      · <strong>24 / 32-bit</strong> = 补齐到该档位。设为高于硬件能力的位深可能导致扬声器无声。</p>
+      <p class="hint">扬声器 / 听筒端口的<strong>位深上限</strong>：内置 DAC 多有 24bit 能力，原厂策略却常只声明 16bit，补到 <strong>24-bit（推荐）</strong> 可减少播放截位损耗。<br>
+      确定硬件支持 32bit 才选 32-bit；<strong>16-bit</strong>＝保持原厂。选高于硬件能力可能扬声器<strong>无声</strong>。</p>
       <div class="pills" id="pillSpkBits"></div>
     </div>
 
     <div class="field">
       <label>DSP 位宽强制</label>
-      <p class="hint">高通 QTI 音频 HAL 原生支持系统属性 <code>persist.vendor.audio_hal.dsp_bit_width_enforce_mode</code>：设为 <strong>24 / 32</strong> 时，audioserver 启动即通过 "ASM Bit Width" 混音控制器把 ADSP 的 ASM 流强制到该位宽。<br>
-      · <strong>16（关）</strong> = 不注入任何属性（原厂行为，ADSP 按内容位深处理）。<br>
-      · <strong>24 / 32-bit</strong> = 点「应用并生效」时注入，重启音频服务后生效；<strong>一键还原</strong>会自动清除。<br>
-      纯属性层操作，不改写任何原厂文件。</p>
+      <p class="hint">把高通 QTI 的 ADSP <strong>ASM 流强制到指定位宽</strong>（注入属性 <code>persist.vendor.audio_hal.dsp_bit_width_enforce_mode</code>），让扬声器回放的混音链路以更高位宽工作、减少中间截位。<br>
+      <strong>怎么选</strong>：<strong>24-bit（推荐）</strong>，硬件与 ROM 支持时可用 32-bit；<strong>16（关）</strong>＝原厂行为，出问题第一个回退到它。<br>
+      点「应用并生效」时注入、重启服务后生效，「一键还原」自动清除（纯属性层）。</p>
       <div class="pills" id="pillSpkDsp"></div>
     </div>
 
     <div class="field">
       <label>扬声器一键优化</label>
-      <p class="hint">应用「扬声器最佳实践」:44.1kHz + 24bit + 零重采样（对齐 44.1k 曲库）。HiRes 实验档请在终端跑 <code>hifi speaker hires</code>。</p>
+      <p class="hint">一键把扬声器 / 听筒设成「<strong>44.1 kHz + 24bit</strong>」免 SRC 组合：回放不再被系统重采样、位深同时补齐（<strong>推荐</strong>）。<br>
+      「还原 auto (16bit)」把档位交回系统；更高档（192 kHz / 32bit）属 <strong>实验</strong>，终端跑 <code>hifi speaker hires</code>。</p>
       <div class="pills">
         <button class="pill" id="btnSpkFlat">一键优化 (44.1k / 24bit)<em>44.1k 曲库 · 推荐</em></button>
         <button class="pill" id="btnSpkAuto">还原 auto (16bit)<em>回到原厂</em></button>
@@ -144,7 +140,9 @@
 
     <div class="field">
       <label>BIT_PERFECT 输出通道（实验 · 仅 AIDL）</label>
-      <p class="hint">声明 Android 14+ 的 BIT_PERFECT 输出端口（hifi_output）并接入各播放路由。<strong>仅 AIDL 方言（高通新机型）生效</strong>：HIDL 机型在「应用」时会被直接拒绝。播放器须用 preferred mixer attributes API 主动请求，未请求则走原混音路径，无副作用。</p>
+      <p class="hint">声明 Android 14+ 的 <strong>BIT_PERFECT 输出通道</strong>（<code>hifi_output</code>）并接入播放路由：播放器用 <code>preferred mixer attributes</code> API 请求即<strong>免混音、免重采样</strong>，直出比特完美。<br>
+      <strong>仅 AIDL 方言（高通新机型）生效</strong>，HIDL 机型应用时会被拒绝。<br>
+      <strong>怎么选</strong>：关闭＝原厂；想验证就开启，再到播放器侧主动请求（<strong>实验</strong>，未请求走原混音路径，无副作用）。</p>
       <p class="hint" id="bpDialect" hidden></p>
       <div class="pills" id="pillBp">
         <button class="pill" data-bp="0">关闭<em>不声明通道 · 等同原厂</em></button>
@@ -155,7 +153,7 @@
     <div class="field row">
       <div>
         <label>应用后自动重启音频服务</label>
-        <p class="hint">关闭则改动在下次重启手机后生效，更稳妥。</p>
+        <p class="hint">开启＝点「应用并生效」后自动重启音频服务，<strong>改动立即生效</strong>（当前播放短暂中断）；关闭＝等下次重启手机生效（<strong>更稳妥</strong>）。</p>
       </div>
       <button id="btnRestart" class="switch" role="switch" aria-checked="false"><i></i></button>
     </div>
@@ -202,7 +200,7 @@
       <button id="btnDoctor" class="btn small ghost">开始校验</button>
     </div>
     <pre id="doctorBox" class="log tall">—</pre>
-    <p class="hint">跑一次 <code>hifi doctor</code>（只跑 <code>[1]–[7]</code>），把「到底有没有真正生效」拆成四层证据：<br>
+    <p class="hint"><strong>档位设了却不生效？先跑这里。</strong>它一次 <code>hifi doctor</code>（只跑 <code>[1]–[7]</code>），把「到底有没有真正生效」拆成四层证据：<br>
     <strong>A 配置层</strong> 生效文件里端口的上限与位深 → <strong>B 系统层</strong> audioserver 读到的内容 →
     <strong>C 能力层</strong> 解码器<em>声明</em>支持什么（<strong>不代表在跑</strong>）→
     <strong>D 链路层</strong> 此刻真正协商出的 <code>rate</code> / <code>format</code> 与占用进程。<br>
