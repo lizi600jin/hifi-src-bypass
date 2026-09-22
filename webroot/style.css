@@ -151,6 +151,11 @@ html, body {
 .danger-zone li strong { color: var(--fg); }
 .danger-zone code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); padding: 1px 5px; border-radius: 5px; color: var(--fg); }
 
+/* ---- smart PA power (hardware risk) ---- */
+.pa-zone { border-color: #d93025; background: color-mix(in srgb, #d93025 6%, var(--panel)); }
+.pa-alert { color: #d93025; }
+@media (prefers-color-scheme: dark) { .pa-zone { border-color: #f28b82; background: color-mix(in srgb, #f28b82 8%, var(--panel)); } .pa-alert { color: #f28b82; } }
+
 .log {
   margin: 0; max-height: 240px; overflow: auto;
   background: var(--panel-2); border-radius: 10px; padding: 11px 12px;
