@@ -1968,6 +1968,10 @@ do_pa() {
       if pa_set $TM_SPK_GAIN "$val"; then
         printf 'earpiece-speaker PA gain = %s\n' "$val"
         printf '提示：控件 22（听筒）不受此命令影响；数值越大失真越大，出现破音立即执行: hifi pa gain reset\n'
+        # persist the tier so `hifi json` / WebUI reflect the new state (the
+        # WebUI is the primary entry point and re-reads the conf on refresh)
+        PA_GAIN="$n"
+        save_conf
       else
         printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
         return 1
@@ -1987,6 +1991,9 @@ do_pa() {
       fi
       if pa_set $TM_BOOST_L "MAX_STATE_${m}" && pa_set $TM_BOOST_R "MAX_STATE_${m}"; then
         printf 'speaker boost max state = MAX_STATE_%s (L/R)\n' "$m"
+        # persist like gain: json / WebUI must reflect the new tier
+        PA_BOOST="$m"
+        save_conf
       else
         printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
         return 1

@@ -155,6 +155,18 @@ html, body {
 .pa-zone { border-color: #d93025; background: color-mix(in srgb, #d93025 6%, var(--panel)); }
 .pa-alert { color: #d93025; }
 @media (prefers-color-scheme: dark) { .pa-zone { border-color: #f28b82; background: color-mix(in srgb, #f28b82 8%, var(--panel)); } .pa-alert { color: #f28b82; } }
+/* background-image mode: the PA tint must follow the panel-opacity slider just
+   like its parent .card, otherwise the PA field renders as a fully opaque red
+   block sitting on a translucent card.  Same 6%/8% red tint, but the panel
+   component of the mix goes translucent with --fg-alpha. */
+body.has-bg .pa-zone {
+  background: color-mix(in srgb, #d93025 6%, color-mix(in srgb, var(--panel) calc(var(--fg-alpha, 50) * 1%), transparent));
+}
+@media (prefers-color-scheme: dark) {
+  body.has-bg .pa-zone {
+    background: color-mix(in srgb, #f28b82 8%, color-mix(in srgb, var(--panel) calc(var(--fg-alpha, 50) * 1%), transparent));
+  }
+}
 
 .log {
   margin: 0; max-height: 240px; overflow: auto;
