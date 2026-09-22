@@ -1477,6 +1477,26 @@ else
   printf '\n⑤b BIT_PERFECT : ⚪ 已声明未激活 —— 策略里已有 hifi_output 通道，但此刻没有 BitPerfect 真实数据行在跑（播放器未用 preferred mixer attributes API 请求；dumpsys 表格列标题不算）\n'
 fi
 
+# ---- ⑥ DSP 位宽强制 (SPK_DSP_BITS, v2.0.0 WP1) ------------------------------
+# One summary line (⑥) is not a check: it shows the raw property and the wanted
+# value, but never says whether they MATCH.  This block does, and it also
+# states the limit of what the module can guarantee.
+printf '\n---- ⑥ DSP 位宽强制（SPK_DSP_BITS → persist.vendor.audio_hal.dsp_bit_width_enforce_mode）----\n'
+printf '配置期望    : SPK_DSP_BITS=%s' "$SPK_DSP_WANT"
+case "$SPK_DSP_WANT" in
+  16)   printf '（16 = 关闭，apply 不注入任何属性）\n' ;;
+  24|32) printf '（apply 会 setprop %s）\n' "$SPK_DSP_WANT" ;;
+esac
+printf 'live 属性   : %s\n' "${CONFIG_DSPBITS:-（空 —— 没设过，或已被 restore 清除）}"
+printf '判定        : %s\n' "$SPK_DSP_VERDICT"
+printf '  下一步    : %s\n' "$SPK_DSP_HINT"
+printf '  服务侧    : service.sh 会在 audioserver 健康的分支里按 config 幂等补一次\n'
+printf '              （用于 HAL 先于 late_start 启动、首启读不到值的情况）\n'
+printf '  能力边界  : 这个属性是"请求"，不是"保证"。只有 ROM 的 audio HAL 自己去读\n'
+printf '              persist.vendor.audio_hal.dsp_bit_width_enforce_mode 时才会生效；\n'
+printf '              HAL 不读它（多数 AOSP / 部分厂商 HAL 就是这样）则本项无可闻效果，\n'
+printf '              模块没法从外部强制。真实的位宽以第 5 段协商结果为准。\n'
+
 # ---- ⑦ P0 开机安全网 (v2.0.0) ----------------------------------------------
 # The safety net is what keeps a rejected patch from ending in a stuck boot
 # animation, so a doctor run that stays silent about it cannot answer "did the
@@ -1500,26 +1520,6 @@ printf '  说明      : bootmode 与熔断计数来自模块状态目录；「�
 printf '              boot verify 记录回答 —— 没有记录是 service.sh 没跑到，不等于已生效。\n'
 printf '  备注      : 本项与音频链路判定无关：degraded / discover-only 都是安全网按设计自保，\n'
 printf '              不会改变本段 ①..⑤ 对采样率与位深的结论。\n'
-
-# ---- ⑥ DSP 位宽强制 (SPK_DSP_BITS, v2.0.0 WP1) ------------------------------
-# One summary line (⑥) is not a check: it shows the raw property and the wanted
-# value, but never says whether they MATCH.  This block does, and it also
-# states the limit of what the module can guarantee.
-printf '\n---- ⑥ DSP 位宽强制（SPK_DSP_BITS → persist.vendor.audio_hal.dsp_bit_width_enforce_mode）----\n'
-printf '配置期望    : SPK_DSP_BITS=%s' "$SPK_DSP_WANT"
-case "$SPK_DSP_WANT" in
-  16)   printf '（16 = 关闭，apply 不注入任何属性）\n' ;;
-  24|32) printf '（apply 会 setprop %s）\n' "$SPK_DSP_WANT" ;;
-esac
-printf 'live 属性   : %s\n' "${CONFIG_DSPBITS:-（空 —— 没设过，或已被 restore 清除）}"
-printf '判定        : %s\n' "$SPK_DSP_VERDICT"
-printf '  下一步    : %s\n' "$SPK_DSP_HINT"
-printf '  服务侧    : service.sh 会在 audioserver 健康的分支里按 config 幂等补一次\n'
-printf '              （用于 HAL 先于 late_start 启动、首启读不到值的情况）\n'
-printf '  能力边界  : 这个属性是"请求"，不是"保证"。只有 ROM 的 audio HAL 自己去读\n'
-printf '              persist.vendor.audio_hal.dsp_bit_width_enforce_mode 时才会生效；\n'
-printf '              HAL 不读它（多数 AOSP / 部分厂商 HAL 就是这样）则本项无可闻效果，\n'
-printf '              模块没法从外部强制。真实的位宽以第 5 段协商结果为准。\n'
 
 printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
 printf '         不开独占时出现 ✅ 模块生效 / ✓ 直通 / ✓ HiFi 通道 = 模块在链路上正常干预；\n'
