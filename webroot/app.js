@@ -207,14 +207,19 @@
   function bgApply() {
     var b = document.body;
     if (!b) return;
+    var root = document.documentElement;
     var url = bgSlotUrl();
     if (!url) {
       b.style.setProperty('--bg-img', 'none');
       b.style.setProperty('--fg-alpha', '100');
       b.classList.remove('has-bg');
+      root.classList.remove('has-bg');
     } else {
       b.style.setProperty('--bg-img', 'url("' + url + '")');
       b.classList.add('has-bg');
+      /* html keeps the class too: its var(--bg) background would otherwise
+         paint over the fixed layer, and :has() is not safe on older WebViews */
+      root.classList.add('has-bg');
       b.style.setProperty('--fg-alpha', String(state.bg.opacity));
     }
   }

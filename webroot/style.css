@@ -198,6 +198,23 @@ body::before {
   background-image: var(--bg-img, none);
   background-size: cover; background-position: center;
 }
+/* html/body's own var(--bg) background would paint over the z-index:-1
+   fixed layer, hiding the image completely -- with a background active both
+   must step aside (app.js keeps the class on <html> in sync too, so no
+   :has() is needed on older WebViews). */
+html.has-bg, body.has-bg { background: transparent; }
+/* hero header and footer carry bare text with no panel behind them, so the
+   background image can clash with it -- give them a card-shaped panel, but
+   floored at 85% opacity: the page title must stay readable over ANY image
+   (the slider keeps governing the content cards). */
+body.has-bg .hero,
+body.has-bg .foot {
+  background: color-mix(in srgb, var(--panel) calc(85% + var(--fg-alpha, 50) / 100 * 15%), transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+body.has-bg .hero { margin-bottom: 14px; }
 body.has-bg .card,
 body.has-bg .banner,
 body.has-bg .stat {
