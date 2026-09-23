@@ -382,14 +382,20 @@
   }
 
   /* clamp k to [cover, 5x cover] and dx/dy so the image always covers
-     the frame (no hole anywhere inside the frame) */
+     the frame (no hole anywhere inside the frame).  Per axis the legal pan
+     interval is [fx, fx+fw-W*k] when the image is wider than the frame and
+     the mirror image of it when narrower -- order lo/hi explicitly, a naive
+     min(fx+fw-W*k, max(fx, dx)) collapses to the lower bound whenever the
+     image overflows the frame and pins the picture to the bottom-right. */
   function bgClamp() {
     var kmin = bgMinScale();
     bgEdit.k = Math.min(kmin * BG_MAX_ZOOM, Math.max(kmin, bgEdit.k));
-    bgEdit.dx = Math.min(bgEdit.fx + bgEdit.fw - bgEdit.img.width * bgEdit.k,
-                         Math.max(bgEdit.fx, bgEdit.dx));
-    bgEdit.dy = Math.min(bgEdit.fy + bgEdit.fh - bgEdit.img.height * bgEdit.k,
-                         Math.max(bgEdit.fy, bgEdit.dy));
+    function axis(d, f, span, size) {
+      var lo = Math.min(f, f + span - size), hi = Math.max(f, f + span - size);
+      return Math.min(hi, Math.max(lo, d));
+    }
+    bgEdit.dx = axis(bgEdit.dx, bgEdit.fx, bgEdit.fw, bgEdit.img.width * bgEdit.k);
+    bgEdit.dy = axis(bgEdit.dy, bgEdit.fy, bgEdit.fh, bgEdit.img.height * bgEdit.k);
   }
 
   function bgCanvasOpen(file) {
@@ -718,7 +724,15 @@
       }
       e.preventDefault();
     }, { passive: false });
-    c.addEventListener('touchend', function () { bgEdit.pinch = 0; });
+    c.addEventListener('touchend', function (e) {
+      bgEdit.pinch = 0;
+      /* a finger was lifted during a pinch: re-anchor the one-finger drag to
+         whichever touch remains, else the next move jumps from stale coords */
+      if (e.touches.length === 1) {
+        var p = bgPt(e.touches[0]);
+        bgEdit.lastX = p.x; bgEdit.lastY = p.y;
+      }
+    });
     /* mouse: drag with the button held, wheel zooms at the cursor */
     c.addEventListener('mousedown', function (e) {
       var p = bgPt(e);
