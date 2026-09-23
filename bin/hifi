@@ -1899,27 +1899,15 @@ pa_get() {
         print v
         exit
       }
-      for (i = 1; i <= NF; i++) {
-        f = $i
-        if (f !~ />/) continue
-        sub(/>/, "", f)
-        sub(/[ :].*/, "", f)
-        if (f != "") { print f; exit }
-      }
-      if (NF >= 3) {
-        v = $3
-        sub(/ .*/, "", v)          # strip the enum tail, keep the value token
-        if (v ~ /^>/) { sub(/>/, "", v) }
-        print v
-        exit
-      }
       # single-line, no-tab readback -- TWO real shapes share it:
       #   K20 legacy:  "EAR SPKR PA Gain: >G_6_DB G_4P5_DB ..."
       #   OP13 vendor: "WSA2_RX0 Digital Volume: 84 (dsrange 0->124)"
-      # The CORRECT value is the FIRST TOKEN AFTER THE COLON in both (the
-      # ">G_6_DB" marker keeps its ">" and is handled by pa_values_match /
-      # pa_set_int afterwards; "84" is the value verbatim).  Only a colon-less
-      # single-token line (a plain value echo) falls back to $1.
+      # ORDER MATTERS: this colon branch MUST run BEFORE the ">" scan below.
+      # The OP13 tail note "(dsrange 0->124)" contains an ARROW, so a naive
+      # ">" scan over a single-line read hits the tail first and returns the
+      # control NAME -- the third real-device bug.  The colon form is the one
+      # shape both tinymix dialects agree on for single-control reads, so it
+      # wins outright.
       if (NF == 1) {
         line = $0
         if (line ~ /:/) {
@@ -1931,6 +1919,28 @@ pa_get() {
           exit
         }
         print $1
+        exit
+      }
+      # ">" marker scan -- TAB-SEPARATED rows only (K20 legacy enum values
+      # like ">G_6_DB" sit in their own tab field).  Never reached for a
+      # single-line read (the colon branch above already handled it), and the
+      # G_-family guard below would reject an arrow-tail hit anyway.
+      for (i = 1; i <= NF; i++) {
+        f = $i
+        if (f !~ />/) continue
+        g = f
+        sub(/>/, "", g)
+        # only the G_-family gain enums (G_DEFAULT / G_0_DB / G_4P5_DB / ...)
+        # are what this marker means -- "0->124"-style tails must not match
+        if (g !~ /^G_[0-9P]/) continue
+        sub(/[ :].*/, "", g)
+        if (g != "") { print g; exit }
+      }
+      if (NF >= 3) {
+        v = $3
+        sub(/ .*/, "", v)          # strip the enum tail, keep the value token
+        if (v ~ /^>/) { sub(/>/, "", v) }
+        print v
         exit
       }
       exit
