@@ -45,7 +45,11 @@ else
 fi
 
 # post-fs-data phase snapshot (service.sh writes the main one later)
-HIFI_REPORT_WHY=post-fs-data \
-  /system/bin/sh "$MODDIR/bin/hifi" report \
+# P0 hardening (v2.0.0 device test finding): this call is NOT covered by the
+# boot timeout above -- a conflicting module can hang `hifi report` too, and
+# post-fs-data runs synchronously inside KernelSU, so the hang shows as a
+# stuck boot logo.  Bound it the same way.
+"$TIMEOUT_BIN" 15 env HIFI_REPORT_WHY=post-fs-data \
+  "$SHELL_BIN" "$MODDIR/bin/hifi" report \
   /data/local/tmp/hifi_src_bypass_report_boot.txt >/dev/null 2>&1
 exit 0
