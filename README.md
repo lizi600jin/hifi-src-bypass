@@ -68,6 +68,22 @@
 
 ## 📋 变更日志（Changelog）
 
+### v2.0.0 · BIT_PERFECT 输出通道 / Smart PA 功率层 / P0 热修
+
+- **新增 BIT_PERFECT 输出通道（AIDL 专属，双门禁）**：`hifi set bp 1` 声明 Android 14+ BIT_PERFECT 输出通道（`hifi_output`），播放器经 preferred mixer attributes API 请求即得无 AudioFlinger 混音、无 SRC 的 BitPerfect 输出线程。**双门禁：AIDL 方言 + SDK 34+**，任一不满足在 apply 时直接拒绝——不写文件、不挂载、不卡开机；HIDL 机型显示「不适用」不误报
+- **新增 Smart PA 功率层（实验）**：`hifi pa gain 0..6 / boost 1|2 / vi on|off`，WebUI「Smart PA 功率」卡片（红色警示 + 7 档 pill + 二次确认）。仅运行时 tinymix 读写零文件改动；**硬编码拒绝**保护算法/校准/Mute 等危险控件（永不提供）；**仅在 TFA9874 机型可用**，功率超限可造成不可逆硬件损伤，保持出厂 0 档最安全
+- **P0 开机安全网热修（真机熔断测试后）**：`service.sh` 全部 11 处控制器调用统一包 `hifi_t` 超时包装（probe/set 10s、apply/restore 30s），`post-fs-data.sh` 尾部 report 包 15s 超时——冲突模块拖挂控制器时最坏情况约 2 分钟内完成降级，不卡死引导。Redmi K20 Pro 真机三层熔断 + 恢复路径全部按设计工作
+- **WebUI 档位指引重写**：六个档位 hint 均为三段式（超越原厂 / 操作路径 / 防负优化）
+- **自检 doctor 增强**：新增 ⑥ DSP 位宽注入状态、⑦ P0 开机安全网状态；机型适配校验新增 SmartPA / USB offload / 厂商 DSP 检测；⑤b BIT_PERFECT 方言判定
+
+### v1.9.2 · 稳定线（P0 安全网 + WebUI 背景图系统）
+
+- **P0 开机安全网（六项）**：boot 探测链 8s 超时自保、audioserver 健康即时熔断卸载、首启 prepare-only、连续 2 次不健康自动禁用自启、`hifi restore` 零音频栈依赖、双语安装提醒——与任何模块/ROM 冲突时要么正常生效要么自动退场，不再卡屏。`hifi bootmode` 三态可查（normal / discover-only / degraded）
+- **`spkdsp` 扬声器 ADSP 位宽强制**：`hifi set spkdsp 24`（16/24/32）→ 属性层强制 QTI HAL 的 ADSP ASM 流位宽，纯属性零文件改动，restore 恒清除
+- **WebUI 背景图系统**：固定背景层 + 3 内置预设 / 3 自定义槽 + 相册式所见即所得裁切编辑器 + 面板透明度滑杆（默认 50%），设置持久化于 localStorage
+- **报告人话解码**：设备报告 HAL 行由裸 rc 码改为 `[ALREADY-UNLOCKED]` 等状态词
+- **不含** BIT_PERFECT 与 Smart PA（BP 在稳定线物理不可达：`ALL_BP="0"`，WebUI 不暴露入口），适合保守用户
+
 ### v1.9.0 · 2026-09-20 · 扬声器档位 / 位深
 
 - **新增「扬声器采样率档位」`SPK_RATE`**：手机内置扬声器/听筒端口钉死单值（auto / 44100 / 48000 / 96000 / 192000 / 384000），与全局混音率正交 —— 扬声器回放 44.1k / 48k 曲库同样免 SRC。**全机型可用**：不依赖 USB HAL 库 / hifi_playback 通道，只读策略 XML 里的扬声器端口 —— 只要 ROM 把扬声器写在 XML（AOSP / QTI HIDL / QTI AIDL 三方言）就生效。**MTK 天玑 / Pixel Tensor 也能用扬声器档位**（策略 XML 标准），只是 USB DAC 上限不受解锁
@@ -76,7 +92,7 @@
 - **真机验证**：K20 Pro (QTI HIDL) + OP13 (QTI AIDL) 双方言均跑通；K20 上 13 首音乐实测 10/13 完美保 0
 - **配置兼容**：旧 `config.conf` 自动加载；`SPK_RATE=auto` / `SPK_BITS=16` 缺省值与 v1.8.2 行为完全一致 —— 升级不会改变任何现有行为
 
-### v1.8.2 / v1.8.1 / v1.8 · 历史
+### v1.8.2 / v1.8.1 / v1.8 / v1.6 · 历史
 
 - v1.8.2 深度校验判定升级三态（比特完美 / 无损上采样 / 有损降档）
 - v1.8.1 率列表分隔符改为按文件自身风格推断；并入六品牌适配调研结论
@@ -89,9 +105,15 @@
 
 | 机型 | SoC | 系统 | 方言 | 模块版本 | 结果 |
 |---|---|---|---|---|---|
-| Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v1.9.0 | ✅ 7 策略 + 2 HAL 挂载；mixer=44100 / hifi=192000 / bits=32 / SPK=44100 / SPKBITS=24；13 首实测 10/13 完美保 0 |
-| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v1.9.0 | ✅ 6 策略 + 4 HAL 挂载；mixer=192000 / hifi=192000 / bits=32 / SPK=96000 / SPKBITS=24；Earpiece @ 96000Hz |
+| Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v2.0.0 | ✅ 三层熔断 + 恢复路径全过（P0 真机验证）；`hifi doctor` 干净；版本史见下方 v1.9.0 数据点 |
+| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10；4/4 HAL 挂载；BP AIDL 双门禁放行；restore 还原正常；doctor rc=0；版本史见下方 v1.9.0 数据点 |
 | vivo PD2408 (`V2408A`) | SM8750 (sun) | OriginOS, Android 16 (SDK 36) | QTI AIDL | v1.9.0 | ✅ 2 策略 + 4 HAL 挂载，boot 干净（2026-09-21 社区回传） |
+
+> **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 16 移植澎湃 OS HyperOS）；
+> 小尾巴为 CX31993（Conexant）+ MAX97220（Maxim）方案与 MOONDROP FreeDSP Mini；
+> 耳机为 MOONDROP Aria 2（真红限定版）与 MOONDROP 竹 II（CHU II）。
+> **v1.9.0 数据点**：K20 Pro 7 策略 + 2 HAL 挂载（mixer=44100 / hifi=192000 / bits=32 / SPK=44100 / SPKBITS=24，13 首实测 10/13 完美保 0）；
+> OnePlus 13 6 策略 + 4 HAL 挂载（mixer=192000 / hifi=192000 / bits=32 / SPK=96000 / SPKBITS=24，Earpiece @ 96000Hz）。
 
 > 首台 vivo 实机数据点：vivo PD2408 上 `libalsautils{,v2}.so` lib64/lib 双层共 4 个库齐全、
 > AIDL 策略配置 2 份均可改写挂载 —— 推翻了此前「vivo 不用 AOSP 的 `libalsautils*so`、第二层没有目标」的调研推断（见 §2.1 vivo 行的更正）。
@@ -280,7 +302,7 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 
 ## 4. 安装
 
-1. 下载本仓库 `dist/hifi-src-bypass-v1.6.zip`
+1. 下载本仓库 [`dist/hifi-src-bypass-v2.0.0.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0)
 2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
 3. 重启
 4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
