@@ -1838,12 +1838,24 @@ PA_SNAPSHOT="$STATE/pa.txt"
 # The TFA control numbers above stay exactly where they were: the tfa path is
 # byte-for-byte the v2.0.0 behaviour.
 PA_BACKEND="unknown"
+# WSA instance table.  A device can carry ONE chip (mono: RX0 only, or stereo:
+# RX0+RX1 under the same prefix) or SEVERAL chips (dual-chip stereo: WSA_ and
+# WSA2_ prefixes each with their own RX0/RX1).  The probe collects EVERY match
+# and groups it by prefix, so `pa gain` writes the SAME tier value to every
+# speaker volume control on the device -- an equal-value link that keeps the
+# factory left/right balance on symmetric AND asymmetric dual-chip layouts
+# (writing only the first chip would shift the stereo image and overload one
+# side).  Per-instance fine tuning is deliberately NOT exposed: it would need
+# verified per-chip data this module does not have.
+#   WSA_N          number of instances (>=1)
+#   WSA_I<p>_PFX   prefix of instance <p> (1-based), e.g. "WSA2_"
+#   WSA_I<p>_RX0   control number of its RX0 volume (always present)
+#   WSA_I<p>_RX1   control number of its RX1 volume, "-" when absent
+#   WSA_I<p>_VI1   control number of its VI_1 switch, "-" when absent
+#   WSA_I<p>_VI2   control number of its VI_2 switch, "-" when absent
+WSA_N=0
 WSA_PREFIX=""
-WSA_RX0=""
-WSA_RX1=""
-WSA_VI_1=""
-WSA_VI_2=""
-# WSA884x loudspeaker digital volume: INT 0..124, LARGER = QUIETER.  Qualcomm
+# WSA loudspeaker digital volume: INT 0..124, LARGER = QUIETER.  Qualcomm
 # maps gain_dB = (124 - volume) / 2, so the OnePlus 13 factory value 84 is
 # ~+20 dB and every -2 steps +1 dB.  84 / tier 0 is the ladder's origin.
 WSA_MAX_VOL=124
@@ -1923,37 +1935,53 @@ _pa_dump() {
 #   <N> WSA[0-9]*RX1 Digital Volume        <- loudspeaker right / ch1 volume
 #   <N> WSA[0-9]*AIF_VI Mixer WSA[0-9]*_VI_1   <- VI feedback switch ch1
 #   <N> WSA[0-9]*AIF_VI Mixer WSA[0-9]*_VI_2   <- VI feedback switch ch2
-# The prefix (WSA / WSA1 / WSA2 / ...) is captured and remembered so the
-# status overview can name the device family precisely.
+# The prefix (WSA / WSA1 / WSA2 / ...) is captured per instance so the status
+# overview can name every chip the device carries.
+#
+# MULTI-CHIP: every prefix forms its own speaker instance.  A dump like
+#   100 WSA_RX0 Digital Volume ... / 101 WSA_RX1 ...
+#   233 WSA2_RX0 Digital Volume ... / 234 WSA2_RX1 ...
+# yields TWO instances, and `pa gain` writes BOTH -- writing only the first
+# would shift the stereo image and overload one side.  A mono layout (RX0
+# alone, no RX1) still probes: RX0 is the one MANDATORY control.
 pa_probe_wsa() {
-  _pa_probe_wsa_set() { WSA_PREFIX="$1"; WSA_RX0="$2"; WSA_RX1="$3"; WSA_VI_1="$4"; WSA_VI_2="$5"; }
-  _pa_probe_wsa_set "" "" "" "" ""
+  WSA_N=0
+  WSA_PREFIX=""
   ensure_dirs
-  # A stereo layout has RX0+RX1 and VI_1+VI_2; a mono handset layout only has
-  # RX0 (and possibly a single VI switch).  RX0 is the one MANDATORY control:
-  # the write arm drives whatever RX channels exist, so the probe succeeds
-  # with RX1/VI_2 missing instead of hiding a perfectly writable mono PA.
+  # group every RX volume row by its prefix; emit one line per instance:
+  #   "<pfx>|<rx0>|<rx1|->|<vi1|->|<vi2|->"
   _pa_dump | awk -F'\t' '
-    $2 ~ /WSA.*RX0 Digital Volume$/ { if (rx0 == "") { rx0 = $1; p = $2; sub(/RX0.*/, "", p) } }
-    $2 ~ /WSA.*RX1 Digital Volume$/ { if (rx1 == "") rx1 = $1 }
-    # the mixer row is "<num>\tWSA2_AIF_VI Mixer WSA2_SPKR_VI_1\t<value>":
-    # the SWITCH name rides in the NAME field ($2) after the "AIF_VI Mixer"
-    # header, so match the _VI_1/_VI_2 suffix inside $2 itself.
-    $2 ~ /AIF_VI Mixer.*_VI_1$/ { if (vi1 == "") vi1 = $1 }
-    $2 ~ /AIF_VI Mixer.*_VI_2$/ { if (vi2 == "") vi2 = $1 }
-    END {
-      if (rx0 != "")
-        printf "%s %s %s %s %s\n", p, rx0, (rx1 == "" ? "-" : rx1),
-                                     (vi1 == "" ? "-" : vi1), (vi2 == "" ? "-" : vi2)
-    }' > "$PA_TMP"
+    function flush_i() {
+      if (pfx != "" && rx0 != "") {
+        printf "%s|%s|%s|%s|%s\n", pfx, rx0,
+               (rx1 == "" ? "-" : rx1), (vi1 == "" ? "-" : vi1), (vi2 == "" ? "-" : vi2)
+      }
+    }
+    $2 ~ /WSA.*RX0 Digital Volume$/ {
+      p = $2; sub(/RX0.*/, "", p)
+      if (p != pfx) { flush_i(); pfx = p; rx0 = ""; rx1 = ""; vi1 = ""; vi2 = "" }
+      rx0 = $1
+    }
+    $2 ~ /WSA.*RX1 Digital Volume$/ {
+      p = $2; sub(/RX1.*/, "", p)
+      if (p != pfx) { flush_i(); pfx = p; rx0 = ""; rx1 = ""; vi1 = ""; vi2 = "" }
+      rx1 = $1
+    }
+    $2 ~ /AIF_VI Mixer.*_VI_1$/ { vi1 = $1 }
+    $2 ~ /AIF_VI Mixer.*_VI_2$/ { vi2 = $1 }
+    END { flush_i() }
+  ' | sort > "$PA_TMP"
   [ -s "$PA_TMP" ] || return 1
-  # shellcheck disable=SC2046  # exactly five fields, produced above
-  _pa_probe_wsa_set $(cat "$PA_TMP")
-  case "$WSA_PREFIX" in
-    WSA[0-9]*) : ;;
-    *) WSA_PREFIX="WSA" ;;
-  esac
+  WSA_N=0
+  while IFS='|' read -r _pfx _rx0 _rx1 _vi1 _vi2; do
+    [ -n "$_pfx" ] || continue
+    WSA_N=$((WSA_N + 1))
+    eval "WSA_I${WSA_N}_PFX=\"$_pfx\" WSA_I${WSA_N}_RX0=\"$_rx0\" \
+          WSA_I${WSA_N}_RX1=\"$_rx1\" WSA_I${WSA_N}_VI1=\"$_vi1\" WSA_I${WSA_N}_VI2=\"$_vi2\""
+  done < "$PA_TMP"
   rm -f "$PA_TMP"
+  [ "$WSA_N" -ge 1 ] || return 1
+  WSA_PREFIX="$WSA_I1_PFX"
   return 0
 }
 
@@ -2021,7 +2049,11 @@ pa_detect() {
   if pa_probe_wsa; then
     PA_BACKEND="wsa"
     _wsa_clean="${WSA_PREFIX%_}"
-    PA_BACKEND_NAME="Qualcomm ${_wsa_clean}88xx (WSA${_wsa_clean#WSA})"
+    if [ "$WSA_N" -ge 2 ]; then
+      PA_BACKEND_NAME="Qualcomm ${_wsa_clean}88xx (${WSA_N} chips)"
+    else
+      PA_BACKEND_NAME="Qualcomm ${_wsa_clean}88xx (WSA${_wsa_clean#WSA})"
+    fi
     return 0
   fi
   # 3..5) the read-only registry entries
@@ -2125,41 +2157,64 @@ pa_wsa_db_of() {
 }
 
 pa_status_wsa() {
-  printf 'Smart PA: wsa（%s via tinymix）[WSA 前缀: %s]\n' "$PA_BACKEND_NAME" "$WSA_PREFIX"
-  rx0="$(pa_get "$WSA_RX0")"
-  rx1=""; [ "$WSA_RX1" != "-" ] && [ -n "$WSA_RX1" ] && rx1="$(pa_get "$WSA_RX1")"
-  v1="";  [ "$WSA_VI_1" != "-" ] && [ -n "$WSA_VI_1" ] && v1="$(pa_get "$WSA_VI_1")"
-  v2="";  [ "$WSA_VI_2" != "-" ] && [ -n "$WSA_VI_2" ] && v2="$(pa_get "$WSA_VI_2")"
-  vi_state="Off"
-  case "$v1" in 1|On|ON|on) vi_state="On" ;; esac
-  db0="$(pa_wsa_db_of "$rx0")"
-  db1="$(pa_wsa_db_of "$rx1")"
-  fac0=""; [ "$rx0" = "$WSA_FACTORY_VOL" ] && fac0=" (出厂值)"
-  fac1=""; [ -n "$rx1" ] && [ "$rx1" = "$WSA_FACTORY_VOL" ] && fac1=" (出厂值)"
-  facv=""; case "$v1" in Off|0|off|OFF) facv=" (出厂值)" ;; esac
-  if [ -n "$rx1" ]; then
-    line1="$(printf '  speaker gain RX0  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s' "$rx0" "$db0" "$fac0" "$WSA_RX0")"
-    line2="$(printf '  speaker gain RX1  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s' "$rx1" "$db1" "$fac1" "$WSA_RX1")"
-  else
-    line1="$(printf '  speaker gain RX0  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s（单声道布局，无 RX1）' "$rx0" "$db0" "$fac0" "$WSA_RX0")"
-    line2=""
+  printf 'Smart PA: wsa（%s via tinymix）\n' "$PA_BACKEND_NAME"
+  if [ "$WSA_N" -ge 2 ]; then
+    printf '  多芯片立体声（%s 实例，等值联动）\n' "$WSA_N"
   fi
-  if [ -n "$WSA_VI_1" ]; then
-    vline="$(printf '  vi feedback       : %s%s ← 控件 %s%s' "$vi_state" "$facv" "$WSA_VI_1" \
-      "$([ -n "$WSA_VI_2" ] && printf '/%s' "$WSA_VI_2")")"
+  p=1
+  while [ "$p" -le "$WSA_N" ]; do
+    eval "pfx=\"\$WSA_I${p}_PFX\" rx0ctl=\"\$WSA_I${p}_RX0\" rx1ctl=\"\$WSA_I${p}_RX1\" \
+          vi1ctl=\"\$WSA_I${p}_VI1\" vi2ctl=\"\$WSA_I${p}_VI2\""
+    rx0="$(pa_get "$rx0ctl")"
+    rx1=""; [ "$rx1ctl" != "-" ] && [ -n "$rx1ctl" ] && rx1="$(pa_get "$rx1ctl")"
+    v1="";  [ "$vi1ctl" != "-" ] && [ -n "$vi1ctl" ] && v1="$(pa_get "$vi1ctl")"
+    db0="$(pa_wsa_db_of "$rx0")"
+    db1="$(pa_wsa_db_of "$rx1")"
+    fac0=""; [ "$rx0" = "$WSA_FACTORY_VOL" ] && fac0=" (出厂值)"
+    fac1=""; [ -n "$rx1" ] && [ "$rx1" = "$WSA_FACTORY_VOL" ] && fac1=" (出厂值)"
+    if [ "$WSA_N" -ge 2 ]; then
+      tag="speaker [$pfx]"
+    else
+      tag="speaker"
+    fi
+    line1="$(printf '  %s RX0  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s' "$tag" "$rx0" "$db0" "$fac0" "$rx0ctl")"
+    printf '%s\n' "$line1"
+    if [ -n "$rx1" ]; then
+      if [ "$WSA_N" -ge 2 ]; then
+        printf '  %s RX1  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s\n' "$tag" "$rx1" "$db1" "$fac1" "$rx1ctl"
+      else
+        printf '  %s RX1  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s\n' "$tag" "$rx1" "$db1" "$fac1" "$rx1ctl"
+      fi
+    elif [ "$WSA_N" -eq 1 ]; then
+      printf '  %s RX1  : 本机无此通道（单声道布局）\n' "$tag"
+    fi
+    if [ "$vi1ctl" != "-" ] && [ -n "$vi1ctl" ]; then
+      vi_state="Off"
+      case "$v1" in 1|On|ON|on) vi_state="On" ;; esac
+      facv=""; case "$v1" in Off|0|off|OFF) facv=" (出厂值)" ;; esac
+      printf '  %s vi        : %s%s ← 控件 %s%s\n' "$tag" "$vi_state" "$facv" "$vi1ctl" \
+        "$([ "$vi2ctl" != "-" ] && [ -n "$vi2ctl" ] && printf '/%s' "$vi2ctl")"
+    fi
+    p=$((p + 1))
+  done
+  if [ "$WSA_N" -eq 1 ]; then
+    printf '%s\n' '  boost             : WSA 机型由固件管理，无手动 boost'
+    printf '%s\n' '  protection algo   : enabled (DSP 内置，不可关)'
   else
-    vline="$(printf '  vi feedback       : 本机无此控件（n/a）')"
+    printf '%s\n' '  boost             : WSA 机型由固件管理，无手动 boost'
+    printf '%s\n' '  protection algo   : enabled (DSP 内置，不可关)'
   fi
-  printf '%s\n' "$line1"
-  [ -n "$line2" ] && printf '%s\n' "$line2"
-  printf '%s\n' "$vline"
-  printf '%s\n' '  boost             : WSA 机型由固件管理，无手动 boost'
-  printf '%s\n' '  protection algo   : enabled (DSP 内置，不可关)'
-  # RX0 must answer; a mono device legitimately lacks RX1, so only the
-  # channels the probe actually bound are required here
-  case "$rx0" in
-    '') printf '本机无 WSA smart PA 或控件号不同，功能不可用\n'; return 1 ;;
-  esac
+  # every instance must answer on RX0 -- a dead chip is a real failure
+  p=1
+  while [ "$p" -le "$WSA_N" ]; do
+    eval "rx0ctl=\"\$WSA_I${p}_RX0\""
+    rx0="$(pa_get "$rx0ctl")"
+    case "$rx0" in
+      '') printf 'WSA 实例 %s（控件 %s）无回读，功能不可用\n' "$p" "$rx0ctl"
+          return 1 ;;
+    esac
+    p=$((p + 1))
+  done
   return 0
 }
 
@@ -2247,20 +2302,32 @@ pa_wsa_tier_of_vol() {
 }
 
 # the write-a-WSA-tier primitive shared by `pa gain` and `pa_apply_conf`:
-# BOTH RX channels (or RX0 alone on a mono layout), read back, fail loudly if
-# any written channel disagrees.
+# EVERY instance, EVERY channel, the SAME tier value -- the equal-value link
+# that keeps multi-chip stereo balanced.  Each control is read back; ANY
+# mismatch fails the whole write (already-written controls stay as-is, the
+# same no-rollback atomicity as the rest of the module).
 pa_wsa_set_tier() {
   n="$1"
   vol="$(pa_wsa_vol_of_tier "$n")"
-  if ! pa_set_int "$WSA_RX0" "$vol"; then
-    printf '!! WSA gain 写入失败（RX0 回读不一致或写入被拒），扬声器增益保持原值\n' >&2
-    return 1
-  fi
-  if [ -n "$WSA_RX1" ] && [ "$WSA_RX1" != "-" ] && ! pa_set_int "$WSA_RX1" "$vol"; then
-    printf '!! WSA gain 写入失败（RX1 回读不一致或写入被拒），扬声器增益保持原值\n' >&2
-    return 1
-  fi
-  if [ -n "$WSA_RX1" ] && [ "$WSA_RX1" != "-" ]; then
+  wsa_fail=0
+  p=1
+  while [ "$p" -le "$WSA_N" ]; do
+    eval "rx0ctl=\"\$WSA_I${p}_RX0\" rx1ctl=\"\$WSA_I${p}_RX1\" pfx=\"\$WSA_I${p}_PFX\""
+    if ! pa_set_int "$rx0ctl" "$vol"; then
+      printf '!! WSA gain 写入失败（实例 %s RX0 控件 %s 回读不一致或写入被拒）\n' "$p" "$rx0ctl" >&2
+      wsa_fail=1
+    fi
+    if [ "$rx1ctl" != "-" ] && [ -n "$rx1ctl" ] && ! pa_set_int "$rx1ctl" "$vol"; then
+      printf '!! WSA gain 写入失败（实例 %s RX1 控件 %s 回读不一致或写入被拒）\n' "$p" "$rx1ctl" >&2
+      wsa_fail=1
+    fi
+    p=$((p + 1))
+  done
+  [ "$wsa_fail" = 0 ] || return 1
+  if [ "$WSA_N" -ge 2 ]; then
+    printf 'WSA loudspeaker gain: %s 实例全部 volume = %s (tier %s, ≈ +%s dB, 估算，等值联动)\n' \
+      "$WSA_N" "$vol" "$n" "$(pa_wsa_db_of "$vol")"
+  elif [ "$WSA_I1_RX1" != "-" ] && [ -n "$WSA_I1_RX1" ]; then
     printf 'WSA loudspeaker gain: RX0/RX1 volume = %s (tier %s, ≈ +%s dB, 估算)\n' \
       "$vol" "$n" "$(pa_wsa_db_of "$vol")"
   else
@@ -2272,16 +2339,32 @@ pa_wsa_set_tier() {
 
 # WSA VI feedback switch: BOOL, digit form (the old tinymix refuses enum words
 # on bool controls, exactly the reason the TFA branch writes digits too).
+# Walks every instance's VI switches.
 pa_wsa_set_vi() {
   v="$1"
   case "$v" in 0|1) ;; *) return 1 ;; esac
-  [ -n "$WSA_VI_1" ] || { printf '!! 本机 WSA 无 VI 反馈控件\n' >&2; return 1; }
-  if pa_set "$WSA_VI_1" "$v" && { [ "$WSA_VI_2" = "-" ] || [ -z "$WSA_VI_2" ] || pa_set "$WSA_VI_2" "$v"; }; then
-    printf 'WSA VI 反馈: 已设为 %s (On/Off)\n' "$v"
-    return 0
-  fi
-  printf '!! WSA VI 写入失败（回读不一致或写入被拒）\n' >&2
-  return 1
+  wsa_fail=0
+  wsa_vi_any=0
+  p=1
+  while [ "$p" -le "$WSA_N" ]; do
+    eval "vi1ctl=\"\$WSA_I${p}_VI1\" vi2ctl=\"\$WSA_I${p}_VI2\""
+    if [ "$vi1ctl" != "-" ] && [ -n "$vi1ctl" ]; then
+      wsa_vi_any=1
+      if ! pa_set "$vi1ctl" "$v"; then
+        printf '!! WSA VI 写入失败（实例 %s 控件 %s 回读不一致或写入被拒）\n' "$p" "$vi1ctl" >&2
+        wsa_fail=1
+      fi
+    fi
+    if [ "$vi2ctl" != "-" ] && [ -n "$vi2ctl" ] && ! pa_set "$vi2ctl" "$v"; then
+      printf '!! WSA VI 写入失败（实例 %s 控件 %s 回读不一致或写入被拒）\n' "$p" "$vi2ctl" >&2
+      wsa_fail=1
+    fi
+    p=$((p + 1))
+  done
+  [ "$wsa_vi_any" = 1 ] || { printf '!! 本机 WSA 无 VI 反馈控件\n' >&2; return 1; }
+  [ "$wsa_fail" = 0 ] || return 1
+  printf 'WSA VI 反馈: 已设为 %s (On/Off)\n' "$v"
+  return 0
 }
 
 # read-only backends: the safety-first refusal every write arm funnels into.
