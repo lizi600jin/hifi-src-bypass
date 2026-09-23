@@ -1888,6 +1888,17 @@ pa_warning() {
 pa_get() {
   $TMIX "$1" 2>/dev/null | tr -d '\r' | awk -F'\t' '
     {
+      # vendor 4-field single read: "<num>\tTYPE\tcount\t<name><pad><value>".
+      # The last tab field still carries name + value (the dump-shaped row);
+      # the value is its LAST whitespace token.  If the device appends the
+      # value as its own tab field instead, $NF is the value alone -- both
+      # shapes resolve to the same last-token extraction.
+      if (NF >= 4 && $2 ~ /^(INT|BOOL|ENUM)$/) {
+        v = $NF
+        sub(/.*[ \t][ \t]*/, "", v)   # keep only the last token
+        print v
+        exit
+      }
       for (i = 1; i <= NF; i++) {
         f = $i
         if (f !~ />/) continue
@@ -1929,6 +1940,44 @@ _pa_dump() {
   printf '%s\n' "$_PA_DUMP_CACHE"
 }
 
+# Normalise ANY tinymix dump dialect into the legacy 3-field shape
+#   "<num>\t<NAME> <VALUE> [enum tail...]"
+# so every dump consumer matches on ONE shape.  Two dialects exist in the wild:
+#
+#   legacy (K20 Pro, old system/bin tinymix) -- 3 tab fields:
+#     233\tWSA2_RX0 Digital Volume\t84 0 1 2 ... 124
+#     -> $1 = num, $2 = name, $3 = value
+#
+#   vendor 4-field (OnePlus 13 / sun-mtp-snd-card, 2023+ QTI):
+#     233\tINT\t1\tWSA2_RX0 Digital Volume                  84
+#     -> $1 = num, $2 = TYPE (INT/BOOL/ENUM/BYTE), $3 = count, $4 = "name<pad>value"
+#     BYTE rows may fold SEVERAL controls onto one physical line -- those are
+#     dropped; every control this module needs is INT/BOOL/ENUM.
+#
+# Inside $4 the name is left-justified against the vendor's column padding, so
+# the value is the LAST whitespace token and the name is everything before it.
+# A single-token value ("84", "Off") survives both splits unchanged.
+_pa_dump_norm() {
+  _pa_dump | awk -F'\t' -v OFS='\t' '
+    $1 ~ /^[0-9]+$/ && NF >= 4 && $2 ~ /^(INT|BOOL|ENUM)$/ {
+      v = $4
+      if (match(v, /[ \t]+[^ \t]+$/)) {
+        val = substr(v, RSTART)
+        sub(/^[ \t]+/, "", val)
+        name = substr(v, 1, RSTART - 1)
+        sub(/[ \t]+$/, "", name)
+      } else {
+        name = v
+        val = ""
+      }
+      print $1, name, val
+      next
+    }
+    $1 ~ /^[0-9]+$/ && NF == 3 { print; next }   # legacy rows pass through
+    # banner / header / folded BYTE lines are dropped
+  '
+}
+
 # --- WSA probe: find the three controls BY NAME inside the tinymix dump. ----
 # Accepted name shapes (WSA881x/882x/884x big versions vary the prefix):
 #   <N> WSA[0-9]*RX0 Digital Volume        <- loudspeaker left / ch0 volume
@@ -1950,26 +1999,38 @@ pa_probe_wsa() {
   ensure_dirs
   # group every RX volume row by its prefix; emit one line per instance:
   #   "<pfx>|<rx0>|<rx1|->|<vi1|->|<vi2|->"
-  _pa_dump | awk -F'\t' '
-    function flush_i() {
-      if (pfx != "" && rx0 != "") {
-        printf "%s|%s|%s|%s|%s\n", pfx, rx0,
-               (rx1 == "" ? "-" : rx1), (vi1 == "" ? "-" : vi1), (vi2 == "" ? "-" : vi2)
-      }
-    }
+  # The dump order is NOT guaranteed to interleave nicely (the real OP13 dump
+  # lists the VI mixers at 203/204, BEFORE the RX volumes at 233/234), so VI
+  # rows are collected per prefix into arrays keyed by prefix -- never tied to
+  # the "current" prefix of the line stream.
+  _pa_dump_norm | awk -F'\t' '
+    function have(p) { return (p in seen) }
     $2 ~ /WSA.*RX0 Digital Volume$/ {
       p = $2; sub(/RX0.*/, "", p)
-      if (p != pfx) { flush_i(); pfx = p; rx0 = ""; rx1 = ""; vi1 = ""; vi2 = "" }
-      rx0 = $1
+      rx0[p] = $1; seen[p] = 1
     }
     $2 ~ /WSA.*RX1 Digital Volume$/ {
       p = $2; sub(/RX1.*/, "", p)
-      if (p != pfx) { flush_i(); pfx = p; rx0 = ""; rx1 = ""; vi1 = ""; vi2 = "" }
-      rx1 = $1
+      rx1[p] = $1; seen[p] = 1
     }
-    $2 ~ /AIF_VI Mixer.*_VI_1$/ { vi1 = $1 }
-    $2 ~ /AIF_VI Mixer.*_VI_2$/ { vi2 = $1 }
-    END { flush_i() }
+    $2 ~ /AIF_VI Mixer.*_VI_1$/ {
+      # switch name: "<PFX>AIF_VI Mixer <PFX>_SPKR_VI_1" -> the instance prefix
+      p = $2; sub(/AIF_VI.*/, "", p)
+      vi1[p] = $1; seen[p] = 1
+    }
+    $2 ~ /AIF_VI Mixer.*_VI_2$/ {
+      p = $2; sub(/AIF_VI.*/, "", p)
+      vi2[p] = $1; seen[p] = 1
+    }
+    END {
+      for (p in seen) {
+        if (!(p in rx0)) continue          # RX0 is the MANDATORY control
+        printf "%s|%s|%s|%s|%s\n", p, rx0[p],
+               ((p in rx1) ? rx1[p] : "-"),
+               ((p in vi1) ? vi1[p] : "-"),
+               ((p in vi2) ? vi2[p] : "-")
+      }
+    }
   ' | sort > "$PA_TMP"
   [ -s "$PA_TMP" ] || return 1
   WSA_N=0
@@ -1994,7 +2055,7 @@ pa_probe_wsa() {
 # arms refuse by design: status shows the raw values and asks the user to run
 # `hifi adapt` so a maintainer report can map the controls safely.
 pa_ro_collect() {  # pa_ro_collect <grep -iE pattern> -> fills PA_RO_HITS
-  _pa_ro_hits="$(_pa_dump | grep -iE "$1" | head -n 6)"
+  _pa_ro_hits="$(_pa_dump_norm | grep -iE "$1" | head -n 6)"
   [ -n "$_pa_ro_hits" ] || return 1
   PA_RO_HITS="$_pa_ro_hits"
   return 0
@@ -2017,8 +2078,8 @@ pa_probe_cirrus() {
   fi
   # weaker signature: BOTH a boost and a preload control must exist, or it is
   # not a CS35L-class PA (a lone "Speaker Boost" would be too greedy)
-  if _pa_dump | grep -qi 'Speaker Boost' && _pa_dump | grep -qiE 'DSP[0-9].*Preload|Preload.*DSP[0-9]'; then
-    PA_RO_HITS="$(_pa_dump | grep -iE 'Speaker Boost|DSP[0-9].*Preload|Preload.*DSP[0-9]' | head -n 6)"
+  if _pa_dump_norm | grep -qi 'Speaker Boost' && _pa_dump_norm | grep -qiE 'DSP[0-9].*Preload|Preload.*DSP[0-9]'; then
+    PA_RO_HITS="$(_pa_dump_norm | grep -iE 'Speaker Boost|DSP[0-9].*Preload|Preload.*DSP[0-9]' | head -n 6)"
     PA_BACKEND_NAME="Cirrus Logic (Speaker Boost)"
     return 0
   fi
@@ -2042,7 +2103,7 @@ pa_probe_mtk() {
 # and the registry walk continues to the WSA probe.
 pa_probe_tfa() {
   ensure_dirs
-  _pa_dump | awk -F'\t' -v e="$TM_EAR_GAIN" -v s="$TM_SPK_GAIN" '
+  _pa_dump_norm | awk -F'\t' -v e="$TM_EAR_GAIN" -v s="$TM_SPK_GAIN" '
     $1 == e { ear_name = $2; ear_val = $3 }
     $1 == s { spk_name = $2; spk_val = $3 }
     END {
