@@ -1,444 +1,132 @@
-# HiFi SRC Bypass · 全机型 USB 直通
+# HiFi SRC Bypass v2.0.0 — Smart PA 功率层 · 全机型适配
 
-> 全机型通用的 Android 模块：**USB 小尾巴 / 有线耳机高解析直通（SRC 绕过）**。
-> **三层上限一起解** —— ① 音频策略 XML（框架允许分发什么）② USB HAL 库里的采样率常量表（DAC 实际能开到多少）
-> ③ **厂商 HiFi 通道的采样率**（接小尾巴后 USB 音频真正走的那条路，v1.8 新增）。
-> 直通上限 96k / 192k / 384k 可选、位深 16 / 24 / 32 bit 可切、
-> 全局混音率与 HiFi 通道率均可对齐音源 —— **对得上的那条路就是比特完美**。
+> 全机型通用的 Android 音频模块：USB 小尾巴 / 有线耳机高解析直通（SRC 绕过）。
+> v2.0.0 在 v1.9.2 基础上新增 **Smart PA 功率层（实验 · 多品牌适配）**，
+> 并为全部档位补齐「超越原厂 / 操作路径 / 防负优化」三段式指引。
 > 原厂文件零改写（systemless 绑定挂载），一键还原、卸载自动清理。
 
-> ### 🆕 v1.9.0 新增「扬声器档位」双旋钮（13 首真机实测）
->
-> `SPK_RATE`（扬声器采样率档位）+ `SPK_BITS`（扬声器位深上限）—— 与已有的
-> `MIXER_RATE` / `HIFI_RATE` / `BIT_DEPTH` **完全正交**：混音器、USB DAC 直通、
-> 内置扬声器三条通路**互不干扰**，每条独立调档。
->
-> | 旋钮 | 取值 | 含义 |
-> |---|---|---|
-> | `SPK_RATE` | `auto` / 44100 / 48000 / 96000 / 192000 / 384000 | 钉死扬声器/听筒端口采样率；`auto` = 原厂不动 |
-> | `SPK_BITS` | 16 / 24 / 32 | 扬声器位深上限；16 = 保持原厂，24/32 = 补齐（内置 DAC 多为 24bit 能力，原厂常只声明 16bit） |
->
-> **真机实测 13 首**（K20 Pro + TTGK CX31993+97220PROMAX 小尾巴）：10/13 完美保 0，
-> 覆盖网易云 VIP 192k 母带、网易云极高音质、QQ 臻品 2.0×2、QQ HQ、汽水 SVIP/关增强/非VIP 共 7 首 44.1k、酷狗 HiRes 96k；
-> 另在 **一加 13（QTI AIDL 方言）** 上验证扬声器档位生效（earpiece @ 96000Hz）。
-> `hifi doctor` [7] 段同步新增扬声器档位生效判定。详见 §1.1 与 §3 档位表。
->
-> **🟢 全机型可用**：扬声器档位**不依赖 USB HAL 库、不依赖 hifi_playback 通道**，
-> 只读取扬声器端口在策略 XML 里的 profile 即可生效 —— 因此**比 USB DAC 解锁的机型覆盖更广**：
-> 只要 ROM 把扬声器端口写在 XML（AOSP / QTI HIDL / QTI AIDL 三方言），
-> `SPK_RATE` / `SPK_BITS` 都生效。**唯一硬阻断：HarmonyOS NEXT**（policy 是二进制，
-> 不是 XML）。**MTK 天玑平台 / Pixel Tensor 也能用扬声器档位**（策略 XML 仍是标准格式），
-> 只是这两类的 USB DAC 上限不受本模块解锁（这是 HAL 层问题，与扬声器档位独立）。
+## 测试设备
 
-> ### ⛔ HarmonyOS NEXT 平台**不兼容**
->
-> HarmonyOS 5+（NEXT）整平台**硬阻断**：① 系统不再对 Magisk / KernelSU / APatch 开放 root，
-> 模块无法挂载；② 音频策略是**二进制 `audio_policy.bin`** 而非 XML，本项目的规则改写路线
-> 完全用不上。v1.9.0 在 HarmonyOS NEXT 上的预期行为：**模块装得上但不会生效**，
-> 也**不会破坏系统**。判断方法：`hifi doctor` 的 [7] 段「生效文件清单」为空 +
-> audioserver 视音频链路无变化 + 系统设置里 audio HAL 路径非 AOSP——任一满足即在 NEXT 上。
->
-> 不在本项目阻击范围的事属于「未来路线图」：紫光展锐、高通 X Elite for Mobile、
-> Sukisu manager 等。详见 `D:\DSH\hifi\.research\device-adaptation.md`。
-
-> ### 🔀 两模块已合并：本项目即唯一维护版本（v1.8）
->
-> 本人此前的「一加 13 专用模块」[op13-hifi-src-bypass](https://github.com/lizi600jin/op13-hifi-src-bypass)
-> **已停止独立更新，其全部能力并入本项目**。原因很简单：通用版在真机上已覆盖并超过专用版的每一项功能
-> —— 机型规则化适配（一加 13 / 红米 K20 Pro / QTI 与 AOSP 两种方言实测通过）、
-> 10 个策略文件的批量规则改写、4 个 USB HAL 库解锁，外加专用版没有的
-> **厂商 HiFi 通道率锁定**。
->
-> **老用户迁移**：请先在 root 管理器里**卸载 op13 专用模块并重启**，再安装本模块。
-> 二者目标完全重叠、会在同一批文件上落补丁，同时安装会互相顶掉；
-> 安装脚本检测到旧模块仍存在时会给出警告，请不要忽略。
-> 本模块的「机型适配校验」页（WebUI 或 `hifi adapt`）会输出你机器的完整判定信息，
-> 遇到没覆盖到的机型把它发给维护者即可。
-
----
-
-本项目由 [op13-hifi-src-bypass](https://github.com/lizi600jin/op13-hifi-src-bypass)（一加 13 专用版）**合并升级**而来：
-从「一加 13 专用 + 机型模板」重做成**不需要任何机型模板**的全机型通用模块 —— 文件在设备上按规则就地改写，
-方言自动识别（Qualcomm AIDL / AOSP HIDL / MediaTek），机型差异交给规则而不是硬编码路径。
-**两份模块自此合并为这一份维护。**
-
----
-
-## 📋 变更日志（Changelog）
-
-### v1.9.0 · 2026-09-20 · 扬声器档位 / 位深
-
-- **新增「扬声器采样率档位」`SPK_RATE`**：手机内置扬声器/听筒端口钉死单值（auto / 44100 / 48000 / 96000 / 192000 / 384000），与全局混音率正交 —— 扬声器回放 44.1k / 48k 曲库同样免 SRC。**全机型可用**：不依赖 USB HAL 库 / hifi_playback 通道，只读策略 XML 里的扬声器端口 —— 只要 ROM 把扬声器写在 XML（AOSP / QTI HIDL / QTI AIDL 三方言）就生效。**MTK 天玑 / Pixel Tensor 也能用扬声器档位**（策略 XML 标准），只是 USB DAC 上限不受解锁
-- **新增「扬声器位深上限」`SPK_BITS`**：扬声器端口允许的最高位深（16 / 24 / 32），24/32 档位补齐原厂常缺的 24bit 能力（覆盖范围同上）
-- **`hifi doctor` [7] 段新增扬声器档位生效校验**：直接报 "✅ 扬声器档位生效（采样率=44100 位深上限=24bit，最高活动端口=Earpiece @ 44100Hz）"
-- **真机验证**：K20 Pro (QTI HIDL) + OP13 (QTI AIDL) 双方言均跑通；K20 上 13 首音乐实测 10/13 完美保 0
-- **配置兼容**：旧 `config.conf` 自动加载；`SPK_RATE=auto` / `SPK_BITS=16` 缺省值与 v1.8.2 行为完全一致 —— 升级不会改变任何现有行为
-
-### v1.8.2 / v1.8.1 / v1.8 · 历史
-
-- v1.8.2 深度校验判定升级三态（比特完美 / 无损上采样 / 有损降档）
-- v1.8.1 率列表分隔符改为按文件自身风格推断；并入六品牌适配调研结论
-- v1.8 新增 HiFi 通道率锁定（第三层），并入 op13 专用版全部能力
-- v1.6 全机型通用版首个 GA 真机验证（K20 Pro + 一加 13）
-
----
-
-## 1. 它解决了什么：为什么「改完 XML 还是 96 kHz」
-
-Android 上其实存在**两个互相独立的上限**，绝大多数教程只处理了上面那个。
-
-| 层 | 在哪 | 决定了什么 | 本模块怎么改 |
+| 设备 | 官方名称 | 系统 | 方言 |
 |---|---|---|---|
-| ① 框架层 | `*audio_policy_configuration*.xml` / `audio_module_config_primary.xml` 里的 `samplingRates` | AudioPolicyManager 允许**分发**的上限 | 规则化改写 profile（第 1.1 节） |
-| ② **硬件层** | `/vendor/lib{,64}/libalsautils{,v2}.so` 里一张 **52 字节常量表** | USB HAL 实际**打开**的上限 —— **DAC 真正看到的** | 等长原位重排这张表（第 1.2 节）★ |
-| ③ **HiFi 通道层**（v1.8 ★） | 策略里**空声明的动态 mixPort**（如 `hifi_playback`） | 接上小尾巴后，USB 音频**真正播放的那条路**的采样率 —— 它原厂是「动态」的，会被钉在 **DAC 自报的最大率**上 | 给它写**静态 profile**，把这条通道锁到**你音源的采样率**（第 1.3 节） |
+| 一加 13 | **OnePlus 13（一加 13）** | Android 16（ColorOS16） | QTI AIDL |
+| 红米 K20 Pro | **Redmi K20 Pro（红米 K20 Pro）** | Android 16 移植澎湃 OS（HyperOS 3） | QTI HIDL |
 
-> **第 ③ 层为什么关键**：接上小尾巴后实测（红米 K20 Pro / 一加 13 一致），USB 音频**根本不走
-> `deep_buffer`**（它挂着 USB 设备却处于 Standby），走的是厂商 HiFi 专用端口；而该端口原厂是
-> `[dynamic]` 的，能力由 HAL 运行时从 **DAC 描述符**上报，策略取最大值 ⇒ **所有音源都被重采样到
-> DAC 的最高率**，没有任何一条内容能比特完美。①② 两层都动不了它 —— v1.8 新增的
-> `HIFI_RATE` 是**唯一**能锁住这条通道的旋钮（实测 384000 → 192000 生效）。
+**测试小尾巴（USB DAC 线）**：CX31993（Conexant）+ MAX97220（Maxim）方案小尾巴、MOONDROP FreeDSP Mini 小尾巴
 
-### 1.1 第一层：策略 XML
-
-模块自动找出本机所有**真正含有 USB / 有线 / DIRECT 输出口**的策略文件并改写：
-
-- 把这些端口的 `samplingRates` 重新封顶到所选档位
-- 原厂只声明 16-bit 时，补上 24-bit / 32-bit 的 profile（**只做加法，从不删掉原厂声明的任何格式**）
-- 主媒体输出（`low_latency_out` / `deep_buffer_out`）的工作频率对齐到所选混音率，消除 AudioFlinger 重采样
-- **扬声器 / 听筒**（`speaker` / `earpiece`）v1.9 起有**自己的两个独立旋钮**：采样率档位 `SPK_RATE`（auto=原厂，或钉死单值）与位深上限 `SPK_BITS`（16=原厂，24/32=补齐）—— 与全局混音率正交，内置扬声器回放 44.1k / 48k 曲库同样可免 SRC、可上 24bit。**全机型可用**：扬声器档位**不依赖 USB HAL 库 / hifi_playback 通道**，只读策略 XML 里的扬声器端口；任何把扬声器端口写在 XML 的机型（AOSP / QTI HIDL / QTI AIDL 三方言，含 MTK 天玑 / Pixel Tensor 的策略部分）都能生效；**唯一硬阻断是 HarmonyOS NEXT**
-
-**输入口（麦克风）一律不碰**，`role="source"` 与 `_IN_` / mic 名字会被两层挡住。
-改写后还有一份**结构校验器**逐项比对端口与路由，只要发现「除了 profile 内容以外还有任何变化」就**拒绝挂载**。
-
-### 1.2 第二层：USB HAL 库的采样率表 ★
-
-这是本模块相对多数同类做法的关键差异。
-
-AOSP 的 USB 音频 HAL 实现（`libalsautils.so` / `libalsautilsv2.so`）里编译进了一张**固定的采样率表**，
-源码位于 `system/media/alsa_utils/alsa_device_profile.c` 的 `std_sample_rates[]`：
-
-```
-工厂  : 96000  88200  192000  176400  48000  44100  32000  24000  22050  16000  12000  11025  8000
-192 kHz: 192000 176400 96000   88200   48000  44100  32000  24000  22050  16000  12000  11025  8000
-384 kHz: 384000 352800 192000  176400  96000  88200  48000  44100  32000  24000  16000  12000  8000
-768 kHz: 768000 705600 384000  352800  192000 176400 96000  88200  48000  44100  24000  16000  8000
-```
-
-**表里第一项就是它对外宣称的最大值**，绝大多数 ROM 是 `96000`。所以哪怕你把 XML 改成 384k，
-DAC 那一侧仍然卡在 96k —— 这就是「改了没用」的根因。
-
-本模块把这张表**原位重排**：
-
-- 四张表**都是 13 项 uint32 = 52 字节**，替换后**文件长度完全不变**，不动任何偏移、不破坏重定位
-- 只补丁**本来就存在**的文件，从不凭空创建覆盖层
-- 补丁完**必须复核**：文件长度不变 + 前 16 字节 ELF 头逐字节相同 + 原表 0 次 / 新表恰好 1 次 / 偏移与原来一致 + 回读那 52 字节与期望完全一致；任一不符就删掉输出并放弃
-- 原表**出现 0 次**（不是 AOSP 表，属厂商自写 HAL）→ 跳过；**出现 2 次以上**（有歧义）→ 拒绝猜测，绝不碰
-
-### 1.3 第三层：厂商 HiFi 通道的采样率（v1.8 ★）
-
-接上小尾巴后实测（红米 K20 Pro / 一加 13 一致）：**USB 音频根本不走 `deep_buffer`**
-（它挂着 USB 设备却处于 Standby），走的是厂商自造的 HiFi 专用端口 —— 如
-`hifi_playback`。这个端口在原厂策略里是**空声明**（`<mixPort name="hifi_playback" role="source" />`），
-即 `[dynamic]`：能力由 HAL 运行时从 **DAC 描述符**上报，而策略对混音类输出取**最大值**
-⇒ 端口被钉死在 DAC 自报的最高率，**所有音源都被重采样到那里**。
-
-**它原厂甚至连 profile 都没有，所以 ①② 两层都动不了它。** v1.8 的做法是给它写一份
-**静态 profile**（按所选位深补 16/24/32 三条、采样率只有一个 —— 用户选的那个），
-AudioPolicyManager 就会按静态声明重建端口。真机验证（红米 K20 Pro，Android 16）：
-
-```
-部署前：AudioOut_5D = hifi_playback, Sample rate: 384000 Hz（DAC 最大率）
-部署后：AudioOut_45 = hifi_playback, Sample rate: 192000 Hz   ← 端口被 APM 按静态 profile 重建
-```
-
-**配套修复**：改写策略文件时，率列表必须沿用**该文件自己**的分隔符 ——
-这不是方言规则而是逐文件风格（AOSP 规范写空格，红米 K20 Pro 的 HIDL 文件却用**逗号**，
-一加 13 用空格，部分机型同一文件内混用；用错会让 AudioPolicyManager 把整串读成一个
-垃圾采样率并拒载策略，**手机直接无声**）。模块按文件自身推断。电话通路 `voip_rx` 一律不碰；
-以及一个块扫描 bug —— 自闭合端口（`<mixPort … />`）会把下一个端口整块吞掉并静默跳过。
-
-### 1.4 为什么有的机器「改 XML 完全没用」
-
-本模块在真机上确认了两种会让第一层彻底失效的形态：
-
-1. **USB 输出口没有 profile** —— 有的 ROM 把 `<devicePort tagName="USB Device Out" …>` 写成空元素，
-   速率由 HAL 运行时决定。此时 XML 里根本没有东西可改。
-2. **Android 13+ 的 AIDL HAL 只把 XML 当骨架** —— 框架 `dumpsys` 里那些端口标着
-   `[dynamic format]`，能力由 HAL 运行时上报；甚至 `Config source` 直接回答 `AIDL HAL`（**不是文件路径**）。
-   这类机器上，**第二层是唯一有效的杠杆**。
-
-所以本模块把第二层做成一等公民，而不是可选项。
+**测试耳机**：MOONDROP Aria 2（咏叹调 2）真红限定版、MOONDROP 竹 III（CHU III）
 
 ---
 
-## 2. 实测结果
+## 版本亮点
 
-两台方言、路径、HAL 库数量全然不同的真机，**没有一行机型专属代码** —— 这是本项目敢说「通用」的依据。
-v1.8 起不再只验证「上限解锁」，而是逐 App 实测**每条音源最终落在哪条路上、有没有重采样**：
+### 🔊 Smart PA 功率层（实验）
+- `hifi pa` / `pa status`：读取 smart PA 型号（TFA9874 等）、增益、boost 档、VI 反馈、保护算法状态
+- `hifi pa gain 0..6|reset`：外放 PA 增益逐档调节（+1dB 起步，每档听够 24h 再加）
+- `hifi pa boost 1|2|reset`：升压上限档
+- `hifi pa vi on|off`：电压电流回读开关（数据口 `/dev/tfa_rw`，需自行解析 DSP 帧）
+- `PA_GAIN=` / `PA_BOOST=` 写入 config.conf，`hifi apply` 时带警示注入
+- **WebUI「Smart PA 功率」卡片**：红色警示边框 + 风险文案（功率超限可造成不可逆硬件损伤），7 档 pill + 二次确认
+- **硬编码拒绝**：ALGO_STATUS(3178) / SmartPA Mute(3175) / Calibration(3177) / TFA Stop(3176) / Profile 换挡 —— 永不提供
+- 仅运行时 tinymix 读写，零文件改动；兼容新旧两代 tinymix 语法（旧版 BOOL 只收数字写入）
 
-| | 米系（QTI，HIDL 风格策略） | O 系（QTI，AIDL） |
-|---|---|---|
-| 设备 | Redmi K20 Pro (`raphael`) · SM8150 · Android 16 | OnePlus 13 (`OP5D0DL1`) · SM8750 · Android 16 |
-| 方言 | `type` / `format`（**逗号**分隔率表） | `tagName` / `pcmType` / `connection`（**空格**分隔率表） |
-| USB HAL 库 | `libalsautils.so` ×2 | `libalsautils.so` + `libalsautilsv2.so`，lib64 + lib **共 4 个** |
-| 挂载规模 | 4 个策略文件 | **10 个**策略文件 |
-| **实测（v1.8）** | 网易云 192k 母带 → HiFi 通道 @192000 **零重采样**；酷狗/汽水/QQ 44.1k → 混音器 @44100 **零重采样** | QQ 音乐 192k FLOAT → 混音器 @192000 **零重采样**（HAL 直收 FLOAT）；酷狗 HiRes 96k → 192k 无损上采样 |
+### 🛡️ 开机安全网 P0（真机熔断测试后的热修）
+- `service.sh` 全部 11 处控制器调用（apply / restore / missing / set / report）统一包 `hifi_t` 超时包装（probe/set 10s、apply/restore 30s），冲突模块把控制器拖挂时不再逐处各卡 90s
+- `post-fs-data.sh` 尾部 report 调用同样包 15s 超时
+- K20 Pro 真机实测：三层熔断（boot 超时 / 不健康卸载 / 连续两次自动禁用）+ 恢复路径全部按设计工作；最坏情况只是多等约 2 分钟开机 + 补丁未生效，不卡死引导
 
-### 2.0 与「App 独占 USB」的对比（如实版）
+### 🖼️ WebUI 背景图系统
+- **固定背景层**：背景图铺满视口、不随页面滚动移动，卡片浮于其上
+- **默认背景**：「誓死效忠水月吉米」开箱即生效
+- **6 槽预设**：3 个内置（誓死效忠水月吉米 / 誓死效忠水月雨 / 誓死效忠天使吉米，均可重命名）+ 3 个自定义槽（从相册选图）
+- **相册式裁切编辑器**：固定裁切框（9:19.5 / 9:16 / 3:4 / 1:1 / 自适应本机实测视口），框内即最终背景（所见即所得），单指拖动 + 双指/滚轮缩放，框外遮罩变暗，只导出框内像素
+- **面板透明度滑杆**（默认 50%）：背景开启时卡片半透明、文字恒不透明，0–100% 自主调节
+- **无损优先**：默认 PNG 无损导出、不自动缩放；仅超 2.5MB 存储预算才提示后单次降采样；JPEG 原图保持 q0.92
+- 设置持久化于 localStorage，覆盖安装/重启后保留
 
-| 维度 | App 独占 USB | 本模块（锁定率上） |
-|---|---|---|
-| 链路级数 | **最短**（App → UAC → DAC） | 多两级（AudioFlinger → Audio HAL → USB HAL） |
-| 重采样 | 无 | 锁定率上**无**；其余采样率无损上采样 |
-| 格式转换 | 无 | float→int（≤24 bit 无损）；部分 HAL 直收 FLOAT |
-| 适用 App | **极少数**（海贝 / UAPP / Poweramp / Neutron） | **全部** App |
-| 与系统共存 | 独占期间通知 / 其他声音全断 | 正常混音、切歌、切设备 |
-| 规格上限 | 取决于 App 自带驱动 | 系统统一（384k / 32bit 已解锁） |
+### 🩺 自检 doctor 增强
+- 深度校验 `[1]–[7]`：新增 ⑥ DSP 位宽注入状态、⑦ P0 开机安全网（bootmode / bootfail 熔断计数 / boot_degraded 标记）
+- 机型适配校验 `[8]–[9]`：逐策略文件补丁结论 + 厂商 DSP（杜比类）检测
 
-**结论必须如实**：「比独占更干净」不成立 —— 独占链路物理上最短。准确的说法是：
-**在你锁定的采样率上，这条路径与独占等价干净**（实测 `线程采样率 == 音源采样率`，零重采样），
-而它的真实优势是 ① 让**没有独占功能的 App**（网易云 / QQ / 汽水 / 酷狗）走上等价干净的路径；
-② 与系统共存（独占是「独我」模式）；③ 规格由系统统一管理，不受单个 App 驱动质量限制。
-
-### 2.0b 混音率的提升（免 SRC 的机制）
-
-AOSP 的 `selectOutput()` 会给「声明采样率恰好装得下请求率」的输出**打高分**，所以
-**混音率与 HiFi 通道率是两个可以两全的旋钮**（真机实测，两个 App 同时播放）：
-
-```
-AudioOut_15 (deep_buffer)   @44100  <- 酷狗   FLOAT@44100   => 零重采样 ✓
-AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 ✓
-```
-
-推荐组合 **`MIXER_RATE=44100` + `HIFI_RATE=192000`**：44.1k 曲库（QQ / 汽水 / 酷狗的标准与高品档）
-与 192k 母带**同时比特完美**，全程没有任何有损下采样 —— 192k 内容装不进 44100 的混音器，
-会被路由自动送进 192000 的 HiFi 通道。
-反之，若把混音率拉到 384k 求高，只会把 44.1k 内容**上采样**（无损但无意义，还更吃 SoC 与 USB 总线）。
-
-
-**未验证**：MTK 与谷歌 Tensor（USB 硬件 offload 通常只到 96k，且多半没有 `libalsautils*so`，本模块会安全跳过）、三星 One UI、Android 12 及更早的老 ROM。这些都有夹具测试覆盖，但没有真机数据。
-
-### 2.1 各厂商兼容性一览
-
-| 厂商 / 平台与系统 | 判定 | 依据与说明 |
-|---|---|---|
-| 小米 · 红米（HyperOS，高通） | ✅ **已实测有效** | 红米 K20 Pro（SM8150）：384000 Hz / PCM_32_BIT 实时直通 |
-| 一加 · OPPO · realme（ColorOS，高通 AIDL） | ✅ **已实测有效** | 一加 13（SM8750）：384k/32bit 直通、192k/24bit + 混音 44.1k 均无异常 |
-| vivo · iQOO（OriginOS / Funtouch，高通与联发科） | ➖ **大概率无需本模块**（未实测真机） | 调研结论（2026-09）：vivo/iQOO **不用 AOSP 的 `libalsautils*so`**（自研 USB HAL），第二层没有目标；但高通旗舰在 OriginOS 下 **USB DAC 原生跟随音源切换采样率、不做全局 SRC**，天玑机型则普遍锁 48k。亦即：高通平台**本来就没有 SRC 问题**，天玑平台锁死在 HAL 层 —— 两条路都轮不到本模块出手。个别 Hi-Fi 机型另有自研通路，与本模块无关 |
-| 努比亚 · 红魔（nubia UI / RedMagic OS，骁龙） | ✅ **大概率有效**（未实测真机） | 调研结论（2026-09）：沿袭 **CAF 音频栈**，策略文件就是 AOSP 那两路（HIDL `/vendor/etc/audio_policy_configuration.xml` 或 AIDL `/odm`/`/vendor` 的 AIDL 配置），**带 AOSP 的 `libalsautils.so` 与那张 52 字节采样率表** —— 与已验证的红米 K20 Pro 同一原理；`samplingRates` 用空格分隔（AOSP 规范风格，本模块按文件自身风格推断）。红魔的 DTS 音效属于上层效果链，不影响两层的改造 |
-| 荣耀（MagicOS，高通 / 联发科） | ⚠️ 可能有效（未实测） | MagicOS 基于 AOSP，策略路径与米系 / O 系接近；但荣耀保留了自家音效与调优通路，仍需以实测为准 |
-| 华为（麒麟 + 鸿蒙） | ❌ **厂商限制，预计无法生效** | 华为使用**自研音频 HAL**，通常不带 AOSP 那张采样率表，第二层没有目标；自 HarmonyOS NEXT 起已不再基于 AOSP，策略文件的格式与路径同本项目的前提完全不同，第一层也难以下手；加之其分区完整性校验更严格，systemless 挂载更容易被拒 |
-| 三星（One UI） | ⚠️ 可能有效（未实测） | 路径接近 AOSP，但三星自写音频 HAL 的比例较高，需实测确认 |
-| 谷歌 Tensor / 联发科（MTK） | ❌ **无法生效**（自研 HAL，无目标） | 调研结论（2026-09）：MTK 使用**自研 `MTKAudioHal`**，没有 `libalsautils*so`，两层都没有可下手的目标；USB 音频走硬性 offload，**上限约 96 kHz 且锁死**。瓶颈在 HAL/驱动层，本模块会**安全跳过**（属正常结果，不是故障） |
-| 索尼 Xperia（骁龙） | ➖ **多为原生直通，无需本模块** | 调研结论（2026-09）：骁龙平台 + 高通音频 HAL，`libalsautils.so` 在位（前提②成立）；但索尼**官方原生支持 USB Hi-Res**（Walkman 血统），USB DAC 直通本就免 SRC。老式 `audio_policy.conf` 用 `|` 分隔且非 XML，**不在本模块处理范围**（现代版本已改用 XML）。瓶颈是其音效链 |
-| Android 12 及更早 | ⚠️ 可能有效（未实测） | 多为 `type` / `format` 方言，代码已按 AOSP / HIDL 处理并有夹具测试，但缺真机数据 |
-
-> **判定口径**：能不能生效，只取决于两件事 ——
-> ① 策略文件里有没有**可改的** USB / 有线输出端口 profile；
-> ② 机器上有没有 **AOSP 的 USB HAL 库**（`libalsautils{,v2}.so`）里的那张采样率表。
-> **两者有其一即可起效**，两者都没有才会彻底无效。
-> 上表标「未实测」的结论，都只是依据平台与音频架构做出的推断 ——
-> 想立刻得到确定答案，跑一次 `hifi doctor`，读第 **[8] 段**即可。
+### 📝 WebUI 档位指引重写
+- 五个档位（混音率 / HiFi 通道率 / 扬声器档位 / DSP 位宽 / 扬声器一键优化）hint 均为三段式：
+  - **超越原厂**：原厂做不到什么、本档位超越点在哪
+  - **操作**：怎么达成 + 用「深度校验」哪一段确认达成
+  - **防负优化**：什么场景会变差 + 回退基准（147:160 非整数重采样等机制事实）
 
 ---
 
-## 3. 档位、位深与预设
+## 真机测试记录
 
-| 项 | 可选值 | 说明 |
-|---|---|---|
-| 直通上限 `MAX_RATE` | 48000 / 96000 / 176400 / 192000 / 352800 / 384000 | 192k 无论选哪档都会保留 |
-| 位深上限 `BIT_DEPTH` | 16 / 24 / 32 | **是上限不是唯一**：16 保持原厂，24 追加 24-bit，32 追加 24+32-bit |
-| 混音率 `MIXER_RATE` | 44100 / 48000 / 192000 / 384000 | 48000 为原厂典型值；**对齐你曲库的采样率即可免重采样** |
-| **HiFi 通道率 `HIFI_RATE`（v1.8 新增）** | auto / 44100 / 48000 / 96000 / 176400 / 192000 / 352800 / 384000 | **接小尾巴后 USB 音频真正走的通道**。`auto` = 原厂动态（跟随 DAC 最大率）；填一个数即锁定该率 —— **锁定率上的内容比特完美，其余采样率被无损上采样，永不有损下采样** |
-| **扬声器采样率 `SPK_RATE`（v1.9 新增）** | auto / 44100 / 48000 / 96000 / 192000 / 384000 | 手机**扬声器 / 听筒**输出端口的采样率。`auto` = 原厂不动；填一个数即把扬声器端口钉死为该率 —— 与全局混音率是两个正交旋钮（混音器归 `MIXER_RATE`，扬声器归它），扬声器回放 44.1k / 48k 曲库同样可免 SRC。**同样永不往下选**。**全机型可用**：不依赖 USB HAL 库 / hifi_playback 通道，只读策略 XML；MTK 天玑 / Pixel Tensor 也能用（策略 XML 标准）；唯一硬阻断 HarmonyOS NEXT |
-| **扬声器位深 `SPK_BITS`（v1.9 新增）** | 16 / 24 / 32 | 扬声器 / 听筒端口允许的位深上限。16 = 保持原厂（默认，最保守）；24 / 32 = 补齐到该档位（内置 DAC 多为 24bit 能力，原厂常只声明 16bit）。设高了可能扬声器无声。**覆盖范围同上** |
+### 一加 13（OnePlus 13 · QTI AIDL · Android 16）
 
-一键预设：`auto`（读小尾巴上报能力自动配）/ `384k` / `192k` / `96k` / `44k` / `192mix` / `384mix`。
+- 覆盖安装 + 重启自愈：策略 **10/10** + **4/4 HAL** 全部解锁并挂载生效
+- 档位切换全回归：混音率 / HiFi 通道率 / 上限 / 位深 / 扬声器档位 / 扬声器位深 / DSP 位宽逐档切换 + 非法值拒绝，全部生效并正确落盘
+- `hifi preset 384k` / `preset auto`（无 DAC 优雅降级）/ `hifi scan` 回归通过
+- `hifi restore` 一键还原正常
+- `hifi doctor` 退出码 **rc=0**
 
-> **选档原则：按音源选，永不往下选。**
-> 锁定率 == 音源率 ⇒ 比特完美；锁定率 > 音源率 ⇒ 无损上采样（带限插值，不丢内容）；
-> 锁定率 < 音源率 ⇒ **有损下采样**（超声频段被滤掉）—— 所以 96k 档不要选，除非你的曲库最高只有 96k。
-> 推荐组合 **`MIXER_RATE=44100` + `HIFI_RATE=192000`**：44.1k 曲库与 192k 母带同时比特完美（见 §2.0b）。
+### 红米 K20 Pro（Redmi K20 Pro · QTI HIDL · Android 16 移植澎湃 OS HyperOS）
 
----
-
-## 4. 安装
-
-1. 下载本仓库 `dist/hifi-src-bypass-v1.6.zip`
-2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
-3. 重启
-4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
-
-安装脚本会**报告本机实际有什么**（策略文件、USB HAL 库、DAC），不做任何假定。
-升级时 `config.conf` 会被保留。
+- **三层熔断测试全过**：boot 挂死超时自保、audioserver 不健康立即卸载、连续两次不健康自动禁用（`BOOTFAIL-CIRCUIT-BREAK`）
+- **恢复路径验证**：健康开机后自动清计数 / 清标记 / 恢复挂载，ENABLED=1、audioserver running
+- **PA 失败路径正确**：Smart PA 控件不存在 / 写入失败时明确报错，不假装成功
+- **WebUI 透明度跟随修复**：面板透明度滑杆与 Smart PA 卡片状态联动交互已修复（commit `82bafef`）
 
 ---
 
-## 5. 使用
+## 已知限制（如实）
 
-### WebUI
-一键预设、单独调混音率/上限/位深、**一键还原**、页内一键校验（= `hifi doctor`）。
-
-### 命令行
-
-```sh
-H=/data/adb/modules/hifi_src_bypass/bin/hifi
-
-sh $H status            # 当前状态：两层是否生效 + 已识别到的文件 + DAC
-sh $H files             # 每个目标文件及其归档、补丁位置
-sh $H hal               # USB HAL 库清单与各自当前的上限
-sh $H dac               # 探测 USB 小尾巴
-sh $H verify            # 检查实际生效的配置与 audioserver 视角
-sh $H doctor            # 深度体检：四层证据（配置 / audioserver / 链路 / 内核）
-sh $H report [file]     # 生成一份可读诊断快照（默认 /data/local/tmp/，adb pull 即可取）
-sh $H rates             # 列出可选档位
-sh $H preset auto       # 读小尾巴能力自动配置（推荐）
-sh $H set hal 0         # 只改策略层，不动 HAL 库
-sh $H apply             # 开启：生成 + 挂载，跨重启保持
-sh $H restore           # 关闭：卸载 + 回原厂，模块保留
-sh $H uninstall         # 手动全量清理（正常由管理器调用）
-```
-
-`hifi missing` / `hifi applied` 返回整数，供开机自检脚本判断「有几个目标掉线了」——
-它们会分别校验两层：一份 XML 认文本标记，一个 `.so` 认采样率表。
+- **Smart PA 增益档位按后端能力分**：TFA9874 / Qualcomm WSA883x-884x 机型可调（gain/vi），awinic / Cirrus / MTK 等后端只读（档位未映射，回传 `hifi adapt` 协助适配）
+- **每侧独立档位受 ROM 控件层限制**：ROM 只给一套对称音量入口时无法实现（如一加 13），等值联动已覆盖该形态
+- **restore 在一加 13 上若提示 partially active 属旧版显示层残留**（本版已加 lazy-umount 兜底修复），功能已还原
+- Smart PA 为实验功能，保持出厂 0 档最安全（功率超限可造成不可逆硬件损伤）
+- HarmonyOS NEXT 平台不兼容（policy 为二进制非 XML）
 
 ---
 
-## 6. 文件结构
+## 下载与安装
 
-```
-module.prop                 模块元信息
-customize.sh                安装脚本（报告本机实情；升级保留配置）
-post-fs-data.sh             开机早期挂载（最关键时机）+ 写诊断快照
-service.sh                  开机后逐目标校验，真丢了才补挂
-action.sh                   管理器操作按钮 = 开/关开关
-uninstall.sh                卸载：跨命名空间解除绑定 + 清空全部残留
-bin/hifi                    控制器（status/files/hal/dac/verify/doctor/report/
-                            rates/set/preset/apply/restore/missing/applied）
-bin/probe192.sh             深度校验：四层证据 + 结论（= hifi doctor）
-payload/patch_policy.awk    规则化策略改写器（方言自动识别）
-payload/check_policy.awk    结构校验器（端口/路由有非预期变化就拒绝挂载）
-payload/patch_hal.sh        USB HAL 采样率表的等长原位重排器
-webroot/                    KernelSU / APatch WebUI
-dist/                       打好的可刷入 zip
-```
-
-### 运行时目录（卸载时整体删除）
-
-```
-/data/adb/hifi_src_bypass/
-├── patched/   生成好的补丁副本（挂载源）
-├── stock/     原厂归档（还原与二次生成的基线）
-├── config.conf
-├── targets.lst        本次决定要补哪些文件（含每层的归档与补丁路径）
-├── report.txt         每个文件「被补丁 / 被跳过」及原因
-├── last.log
-└── loaded_policy.path / config_source.txt   框架自报的配置来源（自动学习）
-
-/data/local/tmp/hifi_src_bypass_report.txt        开机自检写的可读快照
-/data/local/tmp/hifi_src_bypass_report_boot.txt   同上（更早的阶段）
-```
+- 下载：[GitHub Release v2.0.0](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0) · `dist/hifi-src-bypass-v2.0.0.zip`
+- **KernelSU / Magisk / APatch 通用**：管理器 → 从本地安装 → 选择 zip → 重启
+- **覆盖安装保留原 `config.conf`**，已有档位设置自动延续
+- 安装后打开模块页 **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
+- 安装脚本会报告本机实际有什么（策略文件、USB HAL 库、DAC），不做任何假定；如遇卡屏可进安全模式删除模块
 
 ---
 
-## 7. 安全性与可逆性
+## 稳定线 v1.9.2（同 tag 发布，保守推荐）
 
-- **从不写入 `/odm` `/vendor` `/system`**：只在 `/data/adb/…` 生成副本，用 `mount --bind`
-  盖在真实路径上，且在**全局（init）挂载命名空间**里挂，`audioserver` 才看得到
-- **还原 = 卸载绑定**，原厂文件一个字节没动过；进不去全局命名空间时还会扫其它命名空间兜底
-- 策略改写**先过结构校验**，HAL 表改写**先过四项复核**，任何一项不过就放弃而不是「先挂上再说」
-- 判定「是否生效」**分两层**：XML 认文本标记，`.so` 认采样率表 —— 因此开机自检不会误判、
-  也不会因为一个 `grep` 不到标记就无限重挂
-- 用户把某一层关掉后，**已经被挂上的那一层会被主动卸载**，不留悬挂挂载
-- 目标不在列表里了（ROM 升级、层被关闭）也会被卸载
+基于 main 全部 bug 修复，**不含** Smart PA 实验层。
+包含 **P0 开机安全网**（冲突模块自动退场）、探测扩展（SmartPA / USB offload 判定）、
+`spkdsp` 扬声器 ADSP 位宽强制、报告 HAL 状态词人话解码、WebUI 背景图系统。
+适合只要 **SRC 绕过 + 位深补齐** 的保守用户。
 
 ---
 
-## 8. 已知边界
-
-- **不适用**：Android 7 及更早（`audio_policy.conf` 时代，无 XML 策略）→ 安装后保持惰性
-- **未验证**：MTK / 谷歌 Tensor（`libalsautils*so` 常缺失，会走「安全跳过」路径）、三星 One UI、Android 12 及更早
-- **改不了的情况**：ROM 用的是厂商自写 USB HAL（表不存在）且策略 XML 又是无 profile 的空壳 ——
-  此时两层都无从下手，模块会明确报告「本机没有可补丁的目标」而不是假装成功
-- **上限高于 DAC 真实能力会导致无声**：请用 `hifi preset auto` 或 WebUI 的小尾巴卡片对齐档位
-
-### 遇到不支持的机型怎么办
-
-在管理器终端（或 adb）跑一次深度校验：
-
-```sh
-sh /data/adb/modules/hifi_src_bypass/bin/hifi doctor
-```
-
-它的第 **[8] 段「机型适配信息」**就是为这件事准备的，会把三样东西一次列清：
-
-- **策略文件** —— 本机有哪些、模块补了哪一个 / 跳过了哪一个以及原因、每个文件用的是哪种方言
-- **策略基线** —— 模块挂载的内容是由哪些原厂件生成的（归档清单与大小）
-- **音频输出文件的真实路径** —— 逻辑层（策略里 USB / WIRED / DIRECT 端口分别属于哪个文件）
-  + 物理层（内核导出的 `/proc/asound` 声卡与 PCM 节点）+ 框架里绑定的 `card=` 号
-
-把 **[8] 段**和 **[7] 段「排查明细」**一起贴到 issue，再附一句「机型 / 系统版本 / 小尾巴型号 / 现象」，
-就能直接定位是**策略路径不认识**、**方言不认识**，还是 **HAL 表对不上**。
-
-想一次性导出成文件的话：
-
-```sh
-sh /data/adb/modules/hifi_src_bypass/bin/hifi report
-# 写到 /data/local/tmp/hifi_src_bypass_report.txt —— 无需 root 即可 adb pull 取回
-```
+*发布物：`hifi-src-bypass-v2.0.0.zip`（versionCode 200）· 完整变更与验证记录见项目仓库*
 
 ---
 
-## 9. 致谢与参考
+### 🔊 Smart PA 全面适配（一加13 真机诊断驱动）
+- **PA 后端注册表**（运行时按控件名探测，不写死控件号）：
+  | 后端 | 芯片族 | 覆盖机型 | 能力 |
+  |---|---|---|---|
+  | tfa | NXP TFA9874 | K20 Pro 等老旗舰 | gain / boost / vi 全功能 |
+  | wsa | Qualcomm WSA883x/884x | 一加13、小米/三星 2023+ 旗舰 | gain / vi（boost 由固件管理），**多芯片立体声等值联动** |
+  | awinic | 艾为 | 红米/小米中低端、荣耀 | 只读（档位未映射） |
+  | cirrus | Cirrus Logic CS35Lxx | 小米/一加部分旗舰 | 只读 |
+  | mtk | 联发科 SmartPA | 天玑机型 | 只读 |
+- **只读后端不盲写**：status 如实展示原值并提示回传 `hifi adapt` 协助适配；未识别 PA 统一降级不误报
+- **`hifi adapt` 新增 PA 快照段**：社区用户整段回传即可为新机型补映射
+- **真机兼容四轮加固**（一加13 实测驱动）：tfa 探测语义校验（控件名+枚举值双条件）、tinymix dump 双方言解析（厂商 4 字段 / 传统 3 字段）、单控件回读冒号格式（`NAME: VALUE`）取值、回读尾注箭头（`0->124`）不再误截断——最终真机全链：status 84 出厂值 → gain 2 → 80 → reset → 84
+- **WSA 多实例**：单扬 / 单芯片双通道 / 多芯片立体声（WSA_ + WSA2_ 多前缀）同一套代码，gain 对**全部实例等值联动写入** + 逐个回读校验，声像平衡不变
+- **不对称双扬并非不可用**：PA 调节入口是 ROM 暴露的数字音量控件——只要机型把各扬声器通道映射到 mixer 控件（绝大多数机型如此，含一加 13 的 1012+1115E 异形单元组合），等值联动即可正常启用（同档偏移不改出厂左右/上下差异）。仅当 ROM 不暴露可写音量控件时才降级只读。**每侧独立档位**仅受 ROM 控件层限制——ROM 只给一套对称入口时（如一加 13）无法实现，属系统层边界而非模块不作为；注册表架构已就绪，ROM 暴露多套入口的机型出现即可支持
 
-> **说明**：本项目由本人
-> [op13-hifi-src-bypass](https://github.com/lizi600jin/op13-hifi-src-bypass) 二改而来
+### 🖼️ WebUI 裁切编辑器修复
+- **修复拖动被钉死 + 缩放只朝右下角**：`bgClamp()` 平移夹紧区间倒挂（图片恒被钉在右下对齐），已改为逐轴有序区间夹紧——单指自由拖动、双指/滚轮以触点为不动点缩放全部恢复正常
+- 附带加固：双指捏合中抬起一指后，剩余手指重新锚定，不再跳变
+- **PA 档位切换结果弹窗**：与采样率切换同款 toast——成功弹「PA 增益已切到 N 档（≈ +N dB），扬声器已生效」/「已恢复出厂」，不支持或失败弹「⚠️ + 具体原因（可回传 `hifi adapt` 协助适配）」
 
-
-### USB Samplerate Unlocker ★ 第二层的来源
-
-仓库：`yzyhk904/usb-samplerate-unlocker`（另有 `geoffferygree`、`SNiTEBoBy` 等镜像，同源）
-
-**本项目的第二层几乎完全建立在它的工作之上**，具体采纳了：
-
-- **核心结论**：`libalsautils{,v2}.so` 里那张 `std_sample_rates[]` 的第一项就是 HAL 对外宣称的上限，
-  重排它即可解锁 —— 本项目第 1.2 节整节讲的就是这件事
-- **四张表的数值**：本模块 `payload/patch_hal.sh` 里的工厂 / 192k / 384k / 768k 四行常量，
-  取自它的替换规则（13 项 uint32，52 字节）
-- **AOSP 出处**：它 README 指出的 `system/media/alsa_utils/alsa_device_profile.c`
-- **两条设计约束**（来自它的 changelog）：
-  - 32 位 arm 设备上「凭空造出 lib64 覆盖层」会导致爆音 → 本项目因此**只补丁已存在的文件，绝不创建覆盖层**
-  - Android 12 上 `ro.audio.usb.period_us` 的 SELinux 坑
-- **厂商差异**（USB 硬件 offload：Qcomm 到 384k，MTK 与 Tensor 只有 96k）→ 写进了本项目的「已知边界」
-
-**实现上的差异**：它用 `hexdump` 出十六进制再回写成二进制、通过模块覆盖层交付；
-本项目改用 `od -An -v -tu1` + 单遍字节匹配**定位**，原位覆盖，并把「52 字节等长 + ELF 头不变 +
-原表消失 / 新表唯一 + 回读一致」当成**必须复核的性质**，把「表出现 0 次或 2 次以上」分别做成
-「跳过」和「拒绝」，交付方式也改成运行时的绑定挂载。
-
-### Hydro-Br-leur —— 《一加 13T / ColorOS 16 解锁 192 kHz USB 独占模块》
-
-经由本人的 op13 模块继承。采纳：**systemless 绑定挂载音频策略文件**这一整体架构
-（以及「策略基线取本机原厂文件」的原则）。
-
-### USB_SampleRate_Changer_WebUI
-
-经由本人的 op13 模块继承。采纳：WebUI 交互形态与 USB DAC 探测（读 `/proc/asound` 判断能力）的思路。
-
-### Android AOSP（官方文档与源码）
-
-- `system/media/alsa_utils/alsa_device_profile.c` —— `std_sample_rates[]` 表内容的权威出处，
-  也是本项目用来**反向核对**表是否正确的依据
-- `frameworks/av/services/audiopolicy/config/` —— 策略 XML 结构，以及
-  `usb_ / a2dp_ / r_submix_ / bluetooth_*_audio_policy_configuration.xml` 的 `<xi:include>` 分工
-  （被包含文件的根元素是**裸 `<module>`**，且规范禁止嵌套 include）——
-  本项目扫描器的 include 解析就是照这个规范写的
-- 官方文档 *Configure audio policies*
-
-### Magisk / KernelSU / APatch
-
-模块框架与生命周期约定（`module.prop`、`post-fs-data.sh` / `service.sh` / `action.sh`、
-WebUI 桥接、以及用 `nsenter -t 1 -m` 进入全局挂载命名空间）。
-
-
+### 🔧 restore 完整卸载
+- 修复 busy 文件（被 audioserver mmap）导致的补丁挂载残留：普通 umount 失败后自动 lazy umount 兜底，一加13 实测 restore 后零残留
