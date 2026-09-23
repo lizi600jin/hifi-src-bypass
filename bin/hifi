@@ -2032,15 +2032,45 @@ pa_probe_mtk() {
   return 1
 }
 
+# --- TFA probe: name + value semantics of controls 22/23 ---------------------
+# The K20 Pro dump rows look like
+#   22\tEAR PA Gain\t>G_6_DB G_4P5_DB
+#   23\tEAR SPKR PA Gain\t>G_DEFAULT G_1_DB ...
+# so the probe requires: the NAME field contains "PA Gain" (case-insensitive)
+# for BOTH controls, and the VALUE of 22 or 23 is a G_-family gain enum.  A
+# device whose 22/23 are anything else (e.g. TX capture mixers on OP13) fails
+# and the registry walk continues to the WSA probe.
+pa_probe_tfa() {
+  ensure_dirs
+  _pa_dump | awk -F'\t' -v e="$TM_EAR_GAIN" -v s="$TM_SPK_GAIN" '
+    $1 == e { ear_name = $2; ear_val = $3 }
+    $1 == s { spk_name = $2; spk_val = $3 }
+    END {
+      # a) names must be PA Gain controls
+      if (ear_name !~ /[Pp][Aa] [Gg]ain/) exit 1
+      if (spk_name !~ /[Pp][Aa] [Gg]ain/) exit 1
+      # b) at least one value is a G_-family gain enum
+      if (ear_val !~ /(^|>)G_/ && spk_val !~ /(^|>)G_/) exit 1
+      exit 0
+    }'
+  return $?
+}
+
 # --- backend selection: the registry walk ------------------------------------
 # Order matters: the exact, verified layouts first, the generic signatures
 # last.  Called once per PA command; idempotent (the result is cached).
 pa_detect() {
   [ "$PA_BACKEND" != "unknown" ] && return 0
-  # 1) the TFA probe: plain reads of the loudspeaker gain + earpiece gain.
-  #    On a TFA-class device both answer; on a WSA device both come back
-  #    empty, so the probe stays side-effect free (reads only).
-  if [ -n "$(pa_get $TM_SPK_GAIN)" ] && [ -n "$(pa_get $TM_EAR_GAIN)" ]; then
+  # 1) the TFA probe: SEMANTIC check, not a bare read.  A bare "does ctl 23
+  #    answer" is NOT enough -- old-dialect tinymixes echo a control row for
+  #    ANY number, so on a OnePlus 13 controls 22/23 are unrelated WCD capture
+  #    mixers ("TX_AIF3_CAP Mixer DEC6: Off") and the read comes back
+  #    non-empty, which used to mis-select tfa and never reach the WSA probe.
+  #    Both conditions verified against the (cached) full dump instead:
+  #      a) the control NAMES of 22 and 23 contain "PA Gain", and
+  #      b) the current VALUE of 22 or 23 is a G_-family gain enum.
+  #    Still read-only, zero side effects, and a K20 Pro dump passes both.
+  if pa_probe_tfa; then
     PA_BACKEND="tfa"
     PA_BACKEND_NAME="NXP TFA9874"
     return 0
