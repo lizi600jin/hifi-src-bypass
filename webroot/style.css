@@ -108,6 +108,9 @@ html, body {
 }
 .pill em { display: block; font-style: normal; font-size: 11.5px; font-weight: 500; color: var(--fg-dim); margin-top: 2px; }
 .pill.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel-2)); }
+/* two-step confirm armed tier: pulsing amber border = "next click fires" */
+.pill.arm { border-color: #e6a23c; background: color-mix(in srgb, #e6a23c 14%, var(--panel-2)); animation: armPulse 1.2s ease-in-out infinite; }
+@keyframes armPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(230,162,60,.45); } 50% { box-shadow: 0 0 0 5px rgba(230,162,60,0); } }
 .rates .pill { flex: 1 1 96px; text-align: center; padding: 9px 6px; }
 
 .switch {

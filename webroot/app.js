@@ -1043,7 +1043,11 @@
     PA_GAINS.forEach(function (g) {
       var el = document.createElement('button');
       var cur = state.paGain === null ? 0 : Number(state.paGain);
-      el.className = 'pill' + (cur === g[0] ? ' sel' : '');
+      /* two-step confirm: the armed tier gets the `arm` class so the user
+         can SEE that the next click on THIS pill will fire the command --
+         "点一下没反应" came from the armed state being invisible */
+      var armed = state.paConfirm === g[0];
+      el.className = 'pill' + (cur === g[0] ? ' sel' : '') + (armed ? ' arm' : '');
       el.dataset.g = g[0];
       el.textContent = g[1];
       host.appendChild(el);
@@ -1550,6 +1554,18 @@
                         : '把扬声器 PA 增益提高到 +' + n + 'dB';
       banner('⚠ ' + lvl + ' —— 这会直接增大扬声器驱动功率，可能造成振膜损伤/失真/硬件损坏。' +
              '再次点击同一档确认执行；听到破音立即回出厂 0。', true);
+      /* highlight the armed tier WITHOUT rebuilding the pill host: a full
+         renderPa() replaces the button the user is mid-gesture on (and the
+         click delegate's closest() would still work, but detached listeners
+         in tests and double-tap timing on the device do not). */
+      var host = $('pillPa');
+      if (host) {
+        Array.prototype.forEach.call(host.children, function (b) {
+          var g = Number(b.dataset.g);
+          b.className = 'pill' + ((state.paGain === null ? 0 : Number(state.paGain)) === g ? ' sel' : '') +
+                        (g === n ? ' arm' : '');
+        });
+      }
       return;
     }
     state.paConfirm = null;
@@ -1567,9 +1583,12 @@
           toast('PA 增益已恢复出厂');
           banner(txt, false);
         } else {
+          /* dB 语义：档位标注 (+N dB) 是相对出厂的增量；WSA 输出的 ≈+M dB 是
+             绝对驱动电平（出厂即 ≈+20 dB）。弹窗以增量为主语言与档位标注一致，
+             绝对电平放括号里补充，避免"选 +1dB 弹 +21dB"的困惑。 */
           var dbm = txt.match(/≈\s*\+([0-9]+(?:\.[0-9]+)?)\s*dB/);
-          var db = dbm ? ('≈ +' + dbm[1] + ' dB') : ('+' + n + ' dB');
-          toast('PA 增益已切到 ' + n + ' 档（' + db + '），扬声器已生效');
+          var abs = dbm ? ('，出厂 +20dB → 现在 ≈+' + dbm[1] + 'dB') : '';
+          toast('PA 增益已切到 +' + n + ' dB 档' + abs + '，扬声器已生效');
           banner(txt, false);
         }
         return refresh();
