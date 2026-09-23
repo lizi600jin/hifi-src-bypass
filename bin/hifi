@@ -1913,7 +1913,26 @@ pa_get() {
         print v
         exit
       }
-      if (NF == 1) { print $1; exit }   # "tinymix <num>" echo of the value only
+      # single-line, no-tab readback -- TWO real shapes share it:
+      #   K20 legacy:  "EAR SPKR PA Gain: >G_6_DB G_4P5_DB ..."
+      #   OP13 vendor: "WSA2_RX0 Digital Volume: 84 (dsrange 0->124)"
+      # The CORRECT value is the FIRST TOKEN AFTER THE COLON in both (the
+      # ">G_6_DB" marker keeps its ">" and is handled by pa_values_match /
+      # pa_set_int afterwards; "84" is the value verbatim).  Only a colon-less
+      # single-token line (a plain value echo) falls back to $1.
+      if (NF == 1) {
+        line = $0
+        if (line ~ /:/) {
+          sub(/^[^:]*:[ \t]*/, "", line)
+          # the value token may itself carry a tail ("84 (dsrange 0->124)"):
+          # keep only its first whitespace-delimited token
+          sub(/[ \t].*$/, "", line)
+          print line
+          exit
+        }
+        print $1
+        exit
+      }
       exit
     }'
 }
