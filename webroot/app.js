@@ -1523,7 +1523,26 @@
   /* smart PA loudspeaker gain: `hifi pa gain <n>` (n=0 => `pa gain reset`).
      Two-step confirm: the FIRST click on a tier only shows the warning (the
      banner doubles as the confirmation line), the SECOND click on the SAME
-     tier actually fires the command.  Any other click resets the arm. */
+     tier actually fires the command.  Any other click resets the arm.
+     After the command RETURNS (same moment as the sample-rate switch) the
+     result is echoed as a toast, same component as the preset switch:
+       success  -> tier + estimated dB (WSA prints "≈ +N dB"; TFA falls back
+                   to the tier's own +N dB), reset just says restored
+       failure  -> rc != 0, or rc == 0 but the output says 不支持/未识别/被拒,
+                   shows a ⚠️ toast quoting hifi's key line (the toast has no
+                   warn style, so the prefix doubles as the warning look) */
+  function paFailLine(txt) {
+    var lines = String(txt || '').split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (/不支持|未识别|被拒|写入失败|未开放调节|回读不符/.test(l) || /^\s*!!/.test(l)) {
+        l = l.replace(/^\s*!!\s*/, '').trim();
+        return l.length > 60 ? l.slice(0, 60) + '…' : l;
+      }
+    }
+    return '';
+  }
+
   function runPaGain(n) {
     if (state.paConfirm !== n) {
       state.paConfirm = n;
@@ -1540,10 +1559,17 @@
       .then(function (r) {
         busy(false);
         var txt = ((r.stdout || '') + (r.stderr || '')).trim();
-        if (r.errno !== 0) {
+        if (r.errno !== 0 || /不支持|未识别|被拒/.test(txt)) {
           banner('Smart PA 调整失败：' + (txt || 'unknown'), true);
+          toast('⚠️ ' + (paFailLine(txt) ||
+                 '本机 Smart PA 不支持档位调节（可回传 hifi adapt 协助适配）'));
+        } else if (n === 0) {
+          toast('PA 增益已恢复出厂');
+          banner(txt, false);
         } else {
-          toast(n === 0 ? 'PA 增益已回出厂 0' : 'PA 增益已设为 +' + n + 'dB');
+          var dbm = txt.match(/≈\s*\+([0-9]+(?:\.[0-9]+)?)\s*dB/);
+          var db = dbm ? ('≈ +' + dbm[1] + ' dB') : ('+' + n + ' dB');
+          toast('PA 增益已切到 ' + n + ' 档（' + db + '），扬声器已生效');
           banner(txt, false);
         }
         return refresh();
