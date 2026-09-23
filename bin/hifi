@@ -849,7 +849,10 @@ undo_mount() {
   while IFS='|' read -r live patched stk; do
     [ -n "$live" ] || continue
     if is_mounted "$live"; then
-      umount "$live" 2>/dev/null && log "patch unmounted: $live"
+      umount "$live" 2>/dev/null \
+        || umount -l "$live" 2>/dev/null \
+        || true
+      is_mounted "$live" || log "patch unmounted: $live"
     fi
   done < "$TGT"
 
