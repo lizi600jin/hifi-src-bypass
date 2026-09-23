@@ -118,13 +118,14 @@ SPK_DSP_BITS=16
 #      so an older or unreadable SDK is refused as well.
 # 0 = off (v1.9.1 behaviour).
 BIT_PERFECT=0
-# Smart PA power layer (NXP TFA9874-class devices, driven purely through
-# runtime tinymix writes -- zero files, zero mounts).  Empty = never touch the
-# PA (factory behaviour, the safe default).  PA_GAIN=<0..6> raises the
-# loudspeaker PA gain (control 23) on every apply; PA_BOOST=<1|2> sets the
-# boost max state (controls 24+25).  "reset" behaves like empty.  This layer
-# is deliberately decoupled from the policy mount layer: restore never touches
-# the PA controls.
+# Smart PA power layer (NXP TFA9874-class or Qualcomm WSA88xx devices, driven
+# purely through runtime tinymix writes -- zero files, zero mounts).  Empty =
+# never touch the PA (factory behaviour, the safe default).  PA_GAIN=<0..6>
+# raises the loudspeaker PA gain on every apply (TFA: control 23 dB tiers;
+# WSA884x: RX0+RX1 volume 84-2N).  PA_BOOST=<1|2> sets the boost max state on
+# TFA-class devices; WSA backends report it as firmware-managed and skip.
+# "reset" behaves like empty.  This layer is deliberately decoupled from the
+# policy mount layer: restore never touches the PA controls.
 PA_GAIN=""
 PA_BOOST=""
 
@@ -1767,18 +1768,49 @@ do_speaker() {
 }
 
 # ================================================================== smart PA
-# NXP TFA9874-class smart PA layer, driven ONLY through runtime tinymix reads
-# and writes.  Zero files touched, zero mounts -- this is a completely separate
-# layer from the policy mount stack above, so restore deliberately does NOT
-# touch any PA control.
+# Smart PA layer, driven ONLY through runtime tinymix reads and writes.  Zero
+# files touched, zero mounts -- this is a completely separate layer from the
+# policy mount stack above, so restore deliberately does NOT touch any PA
+# control.
 #
-# Controls (Redmi K20 Pro / raphael probe, see the maintainer report):
+# PLUGGABLE BACKEND REGISTRY.  pa_detect() walks the registry in order and
+# stops at the first hit; every backend owns three things: a probe rule, the
+# write semantics it actually supports, and a status renderer.  A backend that
+# has no verified write semantics is READ-ONLY: status shows the raw control
+# values, gain/boost/vi refuse with an "unmapped" message, and the user is
+# pointed at `hifi adapt` so a maintainer report can add the mapping.  NOTHING
+# is ever written to a control the probe did not map -- safety first.
+#
+#   1. tfa     -- NXP TFA9874 (Redmi K20 Pro / raphael probe, see the
+#                 maintainer report).  WRITABLE (gain + vi), the v2.0.0 path:
 #   3174 TFA Profile            single "speaker" tier, switching is refused
 #   22   EAR PA Gain            earpiece (no user command -- mis-touch guard)
 #   23   EAR SPKR PA Gain       loudspeaker gain, the knob users actually want
 #   24/25 SPKR Left/Right Boost Max State
 #   316/317 AIF4_VI Mixer SPKR_VI_1/2   voltage/current feedback switches
 #   3178 ALGO_STATUS            PROTECTED: ENABLE is the burn-the-speaker knob
+#
+#   2. wsa     -- Qualcomm WSA88xx (OnePlus 13 = WSA884x, kernel
+#                 wsa884x_dlkm).  WRITABLE (gain + vi).  The RX digital
+#                 volumes + AIF_VI feedback mixers are located BY NAME inside
+#                 a full tinymix dump; the numbers and the WSA/WSA1/WSA2/WSA3
+#                 name prefix are parsed, never hard-coded.  A mono layout
+#                 (RX1 absent) still probes.  No boost / algo / mute controls
+#                 exist, so the boost arm reports "firmware-managed".
+#
+#   3. awinic  -- Awinic "aw_pa" SmartPAs (Redmi/Xiaomi mid-range, some
+#                 Honor).  READ-ONLY: the gain semantic is not verified.
+#
+#   4. cirrus  -- Cirrus Logic CS35L41/45 ("CS35L..", "Speaker Boost",
+#                 "DSPx Preload"; Xiaomi/OnePlus flagships).  READ-ONLY.
+#
+#   5. mtk     -- MediaTek SmartPA controls ("SmartPA"/"SND_SMARTPA").
+#                 READ-ONLY.
+#
+#   unknown    -- nothing matched: status says so and asks for `hifi adapt`,
+#                 every write arm fails.  NEVER mention a single vendor name
+#                 in the unknown path: the module is device-agnostic.
+#
 # Hard refusals below are deliberate: 3175 (mute), 3176 (stop), 3177
 # (calibration), 3178 (algo), profile switching and /dev/tfa_reg writes are
 # never emitted, not even by accident.
@@ -1792,6 +1824,34 @@ TM_VI_1=316
 TM_VI_2=317
 TM_ALGO=3178
 PA_SNAPSHOT="$STATE/pa.txt"
+
+# Backend selection is probed at RUNTIME, never hard-coded per device:
+#   tfa     : NXP TFA9874 (Redmi K20 Pro).  The enum controls above answer
+#             with words, so plain reads of ctl 23 + 22 are the probe.
+#   wsa     : Qualcomm WSA88xx (OnePlus 13 = WSA884x).  No TFA controls exist;
+#             the RX digital volumes and the VI feedback mixers are located by
+#             NAME inside a full `tinymix` dump.  Control numbers differ
+#             between SoCs and WSA big versions (WSA / WSA1 / WSA2 ... name
+#             prefixes), so both the numbers and the prefix are parsed out of
+#             the dump, never assumed.
+#   unknown : neither probe answers (desktop harness, truly PA-less phones).
+# The TFA control numbers above stay exactly where they were: the tfa path is
+# byte-for-byte the v2.0.0 behaviour.
+PA_BACKEND="unknown"
+WSA_PREFIX=""
+WSA_RX0=""
+WSA_RX1=""
+WSA_VI_1=""
+WSA_VI_2=""
+# WSA884x loudspeaker digital volume: INT 0..124, LARGER = QUIETER.  Qualcomm
+# maps gain_dB = (124 - volume) / 2, so the OnePlus 13 factory value 84 is
+# ~+20 dB and every -2 steps +1 dB.  84 / tier 0 is the ladder's origin.
+WSA_MAX_VOL=124
+WSA_FACTORY_VOL=84
+# Read-only backends: the control names the probe matched (status shows up to
+# this many lines of the dump), plus the backend's display name.
+PA_RO_HITS=""
+PA_BACKEND_NAME=""
 
 pa_warning() {
   printf '%s\n' \
@@ -1808,18 +1868,29 @@ pa_warning() {
 #                                  `tinymix set <num>`   write
 # Both reads therefore go through the argument-less form, which every
 # tinymix accepts.  The current value is the field carrying the `>` prefix
-# ("EAR PA Gain: >G_6_DB G_4P5_DB ..." old / ">G_6_DB:..." new); the last
-# column is the fallback for builds that mark the value differently.
+# ("EAR PA Gain: >G_6_DB G_4P5_DB ..." old / ">G_6_DB:..." new); when no `>`
+# exists the value is the FIRST token of the third tab-field -- for every
+# dialect the dump row is "<num>\t<name>\t<value> [enum tail...]".  Plain awk
+# whitespace splitting cannot recover that shape (the enum tail has the same
+# whitespace), so the field-3 split is done on the TAB character explicitly.
 pa_get() {
-  $TMIX "$1" 2>/dev/null | tr -d '\r' | awk '
+  $TMIX "$1" 2>/dev/null | tr -d '\r' | awk -F'\t' '
     {
       for (i = 1; i <= NF; i++) {
         f = $i
         if (f !~ />/) continue
         sub(/>/, "", f)
+        sub(/[ :].*/, "", f)
         if (f != "") { print f; exit }
       }
-      print $NF
+      if (NF >= 3) {
+        v = $3
+        sub(/ .*/, "", v)          # strip the enum tail, keep the value token
+        if (v ~ /^>/) { sub(/>/, "", v) }
+        print v
+        exit
+      }
+      if (NF == 1) { print $1; exit }   # "tinymix <num>" echo of the value only
       exit
     }'
 }
@@ -1831,13 +1902,189 @@ pa_conf_json_num() {
   esac
 }
 
+# The full-dump reader the WSA probe parses.  A `tinymix` dump has one line per
+# control in every dialect -- the old one as
+#   "<num>\t<name>\t<current> <enum>..."  (current first, value with a ">")
+# the toybox one as
+#   "<num> <name> >Range 0..124: <current>" etc.
+# We do NOT try to parse the CURRENT VALUE here -- only (number, name) pairs.
+# Value reads go through pa_get(), the exact same path the TFA branch uses.
+# The dump is read once and cached, because some dumps run to 380+ lines.
+_pa_dump() {
+  if [ -z "${_PA_DUMP_CACHE:-}" ]; then
+    _PA_DUMP_CACHE="$($TMIX 2>/dev/null | tr -d '\r')"
+  fi
+  printf '%s\n' "$_PA_DUMP_CACHE"
+}
+
+# --- WSA probe: find the three controls BY NAME inside the tinymix dump. ----
+# Accepted name shapes (WSA881x/882x/884x big versions vary the prefix):
+#   <N> WSA[0-9]*RX0 Digital Volume        <- loudspeaker left / ch0 volume
+#   <N> WSA[0-9]*RX1 Digital Volume        <- loudspeaker right / ch1 volume
+#   <N> WSA[0-9]*AIF_VI Mixer WSA[0-9]*_VI_1   <- VI feedback switch ch1
+#   <N> WSA[0-9]*AIF_VI Mixer WSA[0-9]*_VI_2   <- VI feedback switch ch2
+# The prefix (WSA / WSA1 / WSA2 / ...) is captured and remembered so the
+# status overview can name the device family precisely.
+pa_probe_wsa() {
+  _pa_probe_wsa_set() { WSA_PREFIX="$1"; WSA_RX0="$2"; WSA_RX1="$3"; WSA_VI_1="$4"; WSA_VI_2="$5"; }
+  _pa_probe_wsa_set "" "" "" "" ""
+  ensure_dirs
+  # A stereo layout has RX0+RX1 and VI_1+VI_2; a mono handset layout only has
+  # RX0 (and possibly a single VI switch).  RX0 is the one MANDATORY control:
+  # the write arm drives whatever RX channels exist, so the probe succeeds
+  # with RX1/VI_2 missing instead of hiding a perfectly writable mono PA.
+  _pa_dump | awk -F'\t' '
+    $2 ~ /WSA.*RX0 Digital Volume$/ { if (rx0 == "") { rx0 = $1; p = $2; sub(/RX0.*/, "", p) } }
+    $2 ~ /WSA.*RX1 Digital Volume$/ { if (rx1 == "") rx1 = $1 }
+    # the mixer row is "<num>\tWSA2_AIF_VI Mixer WSA2_SPKR_VI_1\t<value>":
+    # the SWITCH name rides in the NAME field ($2) after the "AIF_VI Mixer"
+    # header, so match the _VI_1/_VI_2 suffix inside $2 itself.
+    $2 ~ /AIF_VI Mixer.*_VI_1$/ { if (vi1 == "") vi1 = $1 }
+    $2 ~ /AIF_VI Mixer.*_VI_2$/ { if (vi2 == "") vi2 = $1 }
+    END {
+      if (rx0 != "")
+        printf "%s %s %s %s %s\n", p, rx0, (rx1 == "" ? "-" : rx1),
+                                     (vi1 == "" ? "-" : vi1), (vi2 == "" ? "-" : vi2)
+    }' > "$PA_TMP"
+  [ -s "$PA_TMP" ] || return 1
+  # shellcheck disable=SC2046  # exactly five fields, produced above
+  _pa_probe_wsa_set $(cat "$PA_TMP")
+  case "$WSA_PREFIX" in
+    WSA[0-9]*) : ;;
+    *) WSA_PREFIX="WSA" ;;
+  esac
+  rm -f "$PA_TMP"
+  return 0
+}
+
+# --- backend selection.  Called once per PA command; idempotent. ------------
+# --- read-only backend probes -----------------------------------------------
+# Every probe looks at the (number, name) pairs of the tinymix dump only --
+# no value is read, nothing is written.  A hit stores the matched control
+# names in PA_RO_HITS (newline-separated "<num> <name>", capped later) and
+# returns 0.  These backends have NO verified gain semantics, so the write
+# arms refuse by design: status shows the raw values and asks the user to run
+# `hifi adapt` so a maintainer report can map the controls safely.
+pa_ro_collect() {  # pa_ro_collect <grep -iE pattern> -> fills PA_RO_HITS
+  _pa_ro_hits="$(_pa_dump | grep -iE "$1" | head -n 6)"
+  [ -n "$_pa_ro_hits" ] || return 1
+  PA_RO_HITS="$_pa_ro_hits"
+  return 0
+}
+
+pa_probe_awinic() {
+  # Awinic smart PAs expose "aw_pa"-style control names (case-insensitive);
+  # e.g. "AW862XX aw_pa Boost", "awinic,smartpa ...".
+  pa_ro_collect 'aw_pa|awinic' \
+    && { PA_BACKEND_NAME="Awinic (aw_pa)"; return 0; }
+  return 1
+}
+
+pa_probe_cirrus() {
+  # Cirrus Logic CS35L41/45: the driver registers "CS35L.." prefixed
+  # controls; some builds carry "Speaker Boost" + "DSPx Preload" instead.
+  if pa_ro_collect 'CS35L'; then
+    PA_BACKEND_NAME="Cirrus Logic (CS35L)"
+    return 0
+  fi
+  # weaker signature: BOTH a boost and a preload control must exist, or it is
+  # not a CS35L-class PA (a lone "Speaker Boost" would be too greedy)
+  if _pa_dump | grep -qi 'Speaker Boost' && _pa_dump | grep -qiE 'DSP[0-9].*Preload|Preload.*DSP[0-9]'; then
+    PA_RO_HITS="$(_pa_dump | grep -iE 'Speaker Boost|DSP[0-9].*Preload|Preload.*DSP[0-9]' | head -n 6)"
+    PA_BACKEND_NAME="Cirrus Logic (Speaker Boost)"
+    return 0
+  fi
+  return 1
+}
+
+pa_probe_mtk() {
+  # MediaTek SmartPA plumbing: "SmartPA" / "SND_SMARTPA" control names.
+  pa_ro_collect 'SmartPA|SND_SMARTPA' \
+    && { PA_BACKEND_NAME="MediaTek (SmartPA)"; return 0; }
+  return 1
+}
+
+# --- backend selection: the registry walk ------------------------------------
+# Order matters: the exact, verified layouts first, the generic signatures
+# last.  Called once per PA command; idempotent (the result is cached).
+pa_detect() {
+  [ "$PA_BACKEND" != "unknown" ] && return 0
+  # 1) the TFA probe: plain reads of the loudspeaker gain + earpiece gain.
+  #    On a TFA-class device both answer; on a WSA device both come back
+  #    empty, so the probe stays side-effect free (reads only).
+  if [ -n "$(pa_get $TM_SPK_GAIN)" ] && [ -n "$(pa_get $TM_EAR_GAIN)" ]; then
+    PA_BACKEND="tfa"
+    PA_BACKEND_NAME="NXP TFA9874"
+    return 0
+  fi
+  # 2) the WSA probe: name-matched RX volumes + VI mixers from the full dump.
+  if pa_probe_wsa; then
+    PA_BACKEND="wsa"
+    _wsa_clean="${WSA_PREFIX%_}"
+    PA_BACKEND_NAME="Qualcomm ${_wsa_clean}88xx (WSA${_wsa_clean#WSA})"
+    return 0
+  fi
+  # 3..5) the read-only registry entries
+  if pa_probe_awinic; then
+    PA_BACKEND="awinic"
+    return 0
+  fi
+  if pa_probe_cirrus; then
+    PA_BACKEND="cirrus"
+    return 0
+  fi
+  if pa_probe_mtk; then
+    PA_BACKEND="mtk"
+    return 0
+  fi
+  return 1
+}
+
 # compare a value against the factory default shown in the status overview
 pa_is_factory_gain()   { case "$1" in G_DEFAULT|G_6_DB) return 0 ;; esac; return 1; }
 pa_is_factory_boost()  { case "$1" in MAX_STATE_2) return 0 ;; esac; return 1; }
 pa_is_factory_vi()     { case "$1" in Off|"") return 0 ;; esac; return 1; }
 
+# WSABackend detection needs a scratch file next to the snapshot it serves;
+# put it in the state dir so a read-only root still degrades gracefully.
+PA_TMP="$STATE/pa.tmp.$$"
+
 pa_status() {
   load_conf
+  if ! pa_detect; then
+    # unified unknown verdict -- NO vendor name in it: this module is
+    # device-agnostic and the report goes to the maintainer via `hifi adapt`
+    printf 'Smart PA: 未识别（回传 hifi adapt 协助适配）\n'
+    return 1
+  fi
+  case "$PA_BACKEND" in
+    wsa)     pa_status_wsa ;;
+    tfa)     pa_status_tfa ;;
+    *)       pa_status_ro "$PA_BACKEND" "$PA_BACKEND_NAME" ;;
+  esac
+  return 0
+}
+
+# read-only backend overview: the backend name, then up to 6 matched controls
+# with their live values.  Pure display -- the write arms refuse by design.
+pa_status_ro() {
+  backend="$1"; name="$2"
+  printf 'Smart PA: %s（%s）\n' "$backend" "$name"
+  n=0
+  printf '%s\n' "$PA_RO_HITS" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    num="$(printf '%s' "$line" | awk '{print $1}')"
+    ctlname="$(printf '%s' "$line" | cut -f2)"
+    val="$(pa_get "$num")"
+    printf '  %-44s : %s\n' "${ctlname:-<unnamed>} ($num)" "${val:-n/a}"
+  done
+  printf '  只读（档位未映射，回传 hifi adapt 协助适配）\n'
+  return 0
+}
+
+# the original NXP TFA overview
+pa_status_tfa() {
+  printf 'Smart PA: tfa（%s via tinymix）\n' "$PA_BACKEND_NAME"
   prof="$(pa_get $TM_PROFILE)"
   ear="$(pa_get $TM_EAR_GAIN)"
   spk="$(pa_get $TM_SPK_GAIN)"
@@ -1850,7 +2097,6 @@ pa_status() {
     [ -n "$v" ] || miss=1
   done
   cat <<EOF
-Smart PA (TFA9874 via tinymix)
   PA profile        : ${prof:-n/a} (唯一档，不支持换挡)
   earpiece gain     : ${ear:-n/a}$([ -n "$ear" ] && pa_is_factory_gain "$ear" && printf ' (出厂值)')
   speaker gain      : ${spk:-n/a}$([ -n "$spk" ] && [ "$spk" = G_DEFAULT ] && printf ' (出厂值)')   ← 控件 23
@@ -1862,6 +2108,58 @@ EOF
     printf '本机无 TFA smart PA 或控件号不同，功能不可用\n'
     return 1
   fi
+  return 0
+}
+
+# the Qualcomm WSA overview (OnePlus 13 = WSA884x, prefix WSA2).  The volume
+# is an INT, larger = quieter, so the readable number is the ESTIMATED dB gain
+# (124 - v) / 2 -- flagged as an estimate because the mapping is the Qualcomm
+# convention, not a spec constant.
+pa_wsa_db_of() {
+  v="$1"
+  case "$v" in
+    ''|*[!0-9]*) printf '?' ; return ;;
+  esac
+  [ "$v" -le "$WSA_MAX_VOL" ] || v="$WSA_MAX_VOL"
+  printf '%s' "$(( (WSA_MAX_VOL - v) / 2 ))"
+}
+
+pa_status_wsa() {
+  printf 'Smart PA: wsa（%s via tinymix）[WSA 前缀: %s]\n' "$PA_BACKEND_NAME" "$WSA_PREFIX"
+  rx0="$(pa_get "$WSA_RX0")"
+  rx1=""; [ "$WSA_RX1" != "-" ] && [ -n "$WSA_RX1" ] && rx1="$(pa_get "$WSA_RX1")"
+  v1="";  [ "$WSA_VI_1" != "-" ] && [ -n "$WSA_VI_1" ] && v1="$(pa_get "$WSA_VI_1")"
+  v2="";  [ "$WSA_VI_2" != "-" ] && [ -n "$WSA_VI_2" ] && v2="$(pa_get "$WSA_VI_2")"
+  vi_state="Off"
+  case "$v1" in 1|On|ON|on) vi_state="On" ;; esac
+  db0="$(pa_wsa_db_of "$rx0")"
+  db1="$(pa_wsa_db_of "$rx1")"
+  fac0=""; [ "$rx0" = "$WSA_FACTORY_VOL" ] && fac0=" (出厂值)"
+  fac1=""; [ -n "$rx1" ] && [ "$rx1" = "$WSA_FACTORY_VOL" ] && fac1=" (出厂值)"
+  facv=""; case "$v1" in Off|0|off|OFF) facv=" (出厂值)" ;; esac
+  if [ -n "$rx1" ]; then
+    line1="$(printf '  speaker gain RX0  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s' "$rx0" "$db0" "$fac0" "$WSA_RX0")"
+    line2="$(printf '  speaker gain RX1  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s' "$rx1" "$db1" "$fac1" "$WSA_RX1")"
+  else
+    line1="$(printf '  speaker gain RX0  : volume %s (≈ +%s dB, 估算)%s ← 控件 %s（单声道布局，无 RX1）' "$rx0" "$db0" "$fac0" "$WSA_RX0")"
+    line2=""
+  fi
+  if [ -n "$WSA_VI_1" ]; then
+    vline="$(printf '  vi feedback       : %s%s ← 控件 %s%s' "$vi_state" "$facv" "$WSA_VI_1" \
+      "$([ -n "$WSA_VI_2" ] && printf '/%s' "$WSA_VI_2")")"
+  else
+    vline="$(printf '  vi feedback       : 本机无此控件（n/a）')"
+  fi
+  printf '%s\n' "$line1"
+  [ -n "$line2" ] && printf '%s\n' "$line2"
+  printf '%s\n' "$vline"
+  printf '%s\n' '  boost             : WSA 机型由固件管理，无手动 boost'
+  printf '%s\n' '  protection algo   : enabled (DSP 内置，不可关)'
+  # RX0 must answer; a mono device legitimately lacks RX1, so only the
+  # channels the probe actually bound are required here
+  case "$rx0" in
+    '') printf '本机无 WSA smart PA 或控件号不同，功能不可用\n'; return 1 ;;
+  esac
   return 0
 }
 
@@ -1903,8 +2201,114 @@ pa_set() {
   return 0
 }
 
+# WSA volume write: the same two-positional form as pa_set, but the read-back
+# is an INT compared NUMERICALLY (a naive string compare also works on real
+# tinymix, yet a build that echoes the value with extra formatting must not
+# fail the verification -- so the comparison is numeric when both parse).
+pa_set_int() {
+  ctl="$1"; val="$2"
+  case "$val" in ''|*[!0-9]*)
+    printf '!! 控件 %s 需要 0..%s 的整数，收到 %r\n' "$ctl" "$WSA_MAX_VOL" "$val" >&2
+    return 1 ;;
+  esac
+  if ! $TMIX "$ctl" "$val" >/dev/null 2>&1; then
+    printf '!! 控件 %s 写入命令失败（tinymix 返回非零）\n' "$ctl" >&2
+    return 1
+  fi
+  back="$(pa_get "$ctl")"
+  case "$back" in
+    "$val") return 0 ;;
+    ''|*[!0-9]*)
+      printf '!! 控件 %s 写入后回读非整数: %s\n' "$ctl" "${back:-（空）}" >&2
+      return 1 ;;
+    *)  [ "$back" -eq "$val" ] && return 0 ;;
+  esac
+  printf '!! 控件 %s 写入后回读不符: %s\n' "$ctl" "$back" >&2
+  return 1
+}
+
+# WSA gain tier -> volume: tier N adds +N dB over the factory origin, i.e.
+# volume = 84 - 2*N.  Tier 6 -> 72 (~+26 dB).  Clamped to 0..WSA_MAX_VOL so a
+# corrupt config can never push the value out of the control's range.
+pa_wsa_vol_of_tier() {
+  n="$1"
+  v=$(( WSA_FACTORY_VOL - 2 * n ))
+  [ "$v" -lt 0 ] && v=0
+  [ "$v" -gt "$WSA_MAX_VOL" ] && v="$WSA_MAX_VOL"
+  printf '%s' "$v"
+}
+
+# WSA volume -> nearest tier (for the apply hook's consistency check only);
+# round half up so an odd factory volume still maps onto the ladder.
+pa_wsa_tier_of_vol() {
+  v="$1"
+  [ "$v" -gt "$WSA_FACTORY_VOL" ] && v="$WSA_FACTORY_VOL"
+  printf '%s' "$(( (WSA_FACTORY_VOL - v + 1) / 2 ))"
+}
+
+# the write-a-WSA-tier primitive shared by `pa gain` and `pa_apply_conf`:
+# BOTH RX channels (or RX0 alone on a mono layout), read back, fail loudly if
+# any written channel disagrees.
+pa_wsa_set_tier() {
+  n="$1"
+  vol="$(pa_wsa_vol_of_tier "$n")"
+  if ! pa_set_int "$WSA_RX0" "$vol"; then
+    printf '!! WSA gain 写入失败（RX0 回读不一致或写入被拒），扬声器增益保持原值\n' >&2
+    return 1
+  fi
+  if [ -n "$WSA_RX1" ] && [ "$WSA_RX1" != "-" ] && ! pa_set_int "$WSA_RX1" "$vol"; then
+    printf '!! WSA gain 写入失败（RX1 回读不一致或写入被拒），扬声器增益保持原值\n' >&2
+    return 1
+  fi
+  if [ -n "$WSA_RX1" ] && [ "$WSA_RX1" != "-" ]; then
+    printf 'WSA loudspeaker gain: RX0/RX1 volume = %s (tier %s, ≈ +%s dB, 估算)\n' \
+      "$vol" "$n" "$(pa_wsa_db_of "$vol")"
+  else
+    printf 'WSA loudspeaker gain: RX0 volume = %s (tier %s, ≈ +%s dB, 估算)\n' \
+      "$vol" "$n" "$(pa_wsa_db_of "$vol")"
+  fi
+  return 0
+}
+
+# WSA VI feedback switch: BOOL, digit form (the old tinymix refuses enum words
+# on bool controls, exactly the reason the TFA branch writes digits too).
+pa_wsa_set_vi() {
+  v="$1"
+  case "$v" in 0|1) ;; *) return 1 ;; esac
+  [ -n "$WSA_VI_1" ] || { printf '!! 本机 WSA 无 VI 反馈控件\n' >&2; return 1; }
+  if pa_set "$WSA_VI_1" "$v" && { [ "$WSA_VI_2" = "-" ] || [ -z "$WSA_VI_2" ] || pa_set "$WSA_VI_2" "$v"; }; then
+    printf 'WSA VI 反馈: 已设为 %s (On/Off)\n' "$v"
+    return 0
+  fi
+  printf '!! WSA VI 写入失败（回读不一致或写入被拒）\n' >&2
+  return 1
+}
+
+# read-only backends: the safety-first refusal every write arm funnels into.
+pa_readonly_refusal() {
+  printf '!! 该 PA 后端（%s）暂未开放调节：档位未映射，模块绝不盲写未知控件。\n' "$PA_BACKEND" >&2
+  printf '   请执行 hifi adapt 并把 [8] 段整段回传给维护者，协助补齐映射。\n' >&2
+  return 1
+}
+
 # the apply-time hook: config-driven, warnings printed, read-back verified
 pa_apply_conf() {
+  load_conf
+  pa_detect || { PA_BACKEND="unknown"; }
+  case "$PA_BACKEND" in
+    wsa)     pa_apply_conf_wsa ;;
+    tfa)     pa_apply_conf_tfa ;;
+    *)       # read-only or unknown: PA_GAIN / PA_BOOST must NOT be consumed
+             case "$PA_GAIN$PA_BOOST" in
+               ''|reset) : ;;
+               *) printf '!! 本机 PA 后端（%s）暂不支持写入，PA_GAIN/PA_BOOST 配置被跳过（未落盘修改，控件未动）\n' "$PA_BACKEND" >&2 ;;
+             esac
+             ;;
+  esac
+  return 0
+}
+
+pa_apply_conf_tfa() {
   load_conf
   applied_any=0
   case "$PA_GAIN" in
@@ -1931,6 +2335,26 @@ pa_apply_conf() {
   return 0
 }
 
+pa_apply_conf_wsa() {
+  load_conf
+  case "$PA_GAIN" in
+    [0-6])
+      pa_warning
+      if pa_wsa_set_tier "$PA_GAIN"; then
+        printf 'speaker PA gain = tier %s\n' "$PA_GAIN"
+      else
+        printf '!! PA_GAIN 写入失败（本机可能无 WSA smart PA），扬声器增益保持原值\n' >&2
+      fi
+      ;;
+  esac
+  case "$PA_BOOST" in
+    1|2)
+      printf '!! 本机 PA（WSA884x）无手动 boost 控件，PA_BOOST 由固件管理，跳过\n' >&2
+      ;;
+  esac
+  return 0
+}
+
 pa_snapshot() {
   pa_status > "$PA_SNAPSHOT" 2>&1 || true
   printf '已写入 %s\n' "$PA_SNAPSHOT"
@@ -1938,11 +2362,74 @@ pa_snapshot() {
 
 pa_usage() {
   echo "pa must be one of: status | scan | gain | boost | vi"
-  echo "  status        当前 smart PA 全量状态（纯读）"
+  echo "  status        当前 smart PA 全量状态（纯读，自动识别 TFA / WSA / 其它后端）"
   echo "  scan          状态快照写入 $PA_SNAPSHOT（供 WebUI 轮询）"
-  echo "  gain <0..6>   外放 PA 增益档（写控件 23；0 = 回出厂 G_DEFAULT）"
-  echo "  boost <1|2>   boost 上限档（写控件 24+25；2 = 出厂满档）"
-  echo "  vi <on|off>   VI 电压电流回读开关（写控件 316+317，配合 /dev/tfa_rw）"
+  echo "  gain <0..6>   外放 PA 增益档（TFA: 控件 23 的 dB 档 / WSA: RX volume 84-2N；0 = 出厂；"
+  echo "                未映射后端只读，不提供写入）"
+  echo "  boost <1|2>   boost 上限档（仅 TFA；WSA 由固件管理；未映射后端只读）"
+  echo "  vi <on|off>   VI 电压电流回读开关（TFA: 316+317 / WSA: AIF_VI Mixer）"
+  return 1
+}
+
+# `pa gain <0..6>`: dispatch on the detected backend, persist the tier once.
+pa_do_gain() {
+  n="$1"
+  if ! pa_detect; then
+    printf 'Smart PA: 未识别（回传 hifi adapt 协助适配）\n' >&2
+    return 1
+  fi
+  case "$PA_BACKEND" in
+    tfa|wsa) : ;;
+    *)       pa_readonly_refusal; return 1 ;;
+  esac
+  if [ "$n" = 0 ]; then
+    printf '%s\n' '恢复外放 PA 增益到出厂值'
+  else
+    pa_warning
+  fi
+  case "$PA_BACKEND" in
+    wsa) ok_write=pa_wsa_set_tier ;;
+    *)   ok_write=pa_tfa_set_tier ;;
+  esac
+  if "$ok_write" "$n"; then
+    printf '提示：听筒增益不受此命令影响；增益越大失真越大，出现破音立即执行: hifi pa gain reset\n'
+    # persist the tier so `hifi json` / WebUI reflect the new state (the
+    # WebUI is the primary entry point and re-reads the conf on refresh)
+    PA_GAIN="$n"
+    save_conf
+    return 0
+  fi
+  printf '!! 写入失败：本机 smart PA 控件写入被拒，功能不可用\n' >&2
+  return 1
+}
+
+# the TFA half of the ladder, factored out of the old do_pa gain arm
+pa_tfa_set_tier() {
+  n="$1"
+  case "$n" in
+    0) val=G_DEFAULT ;;
+    *) val="G_${n}_DB" ;;
+  esac
+  if ! pa_set $TM_SPK_GAIN "$val"; then
+    printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
+    return 1
+  fi
+  printf 'earpiece-speaker PA gain = %s\n' "$val"
+  return 0
+}
+
+# the TFA half of the VI switch, factored out of the old do_pa vi arm
+pa_tfa_set_vi() {
+  v="$1"
+  if pa_set $TM_VI_1 "$v" && pa_set $TM_VI_2 "$v"; then
+    if [ "$v" = 1 ]; then
+      printf 'VI 回读已开启，数据口 /dev/tfa_rw（需 root 自行解析 DSP 帧）\n'
+    else
+      printf 'VI 回读已关闭\n'
+    fi
+    return 0
+  fi
+  printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
   return 1
 }
 
@@ -1961,24 +2448,7 @@ do_pa() {
         [0-6]) n="$1" ;;
         *)     pa_usage; return 1 ;;
       esac
-      if [ "$n" = 0 ]; then
-        val=G_DEFAULT
-        printf '%s\n' '恢复外放 PA 增益到出厂值'
-      else
-        val="G_${n}_DB"
-        pa_warning
-      fi
-      if pa_set $TM_SPK_GAIN "$val"; then
-        printf 'earpiece-speaker PA gain = %s\n' "$val"
-        printf '提示：控件 22（听筒）不受此命令影响；数值越大失真越大，出现破音立即执行: hifi pa gain reset\n'
-        # persist the tier so `hifi json` / WebUI reflect the new state (the
-        # WebUI is the primary entry point and re-reads the conf on refresh)
-        PA_GAIN="$n"
-        save_conf
-      else
-        printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
-        return 1
-      fi ;;
+      pa_do_gain "$n" ;;
     boost)
       shift
       case "${1:-}" in
@@ -1986,6 +2456,18 @@ do_pa() {
         1|2)   m="$1" ;;
         *)     pa_usage; return 1 ;;
       esac
+      if ! pa_detect; then
+        printf 'Smart PA: 未识别（回传 hifi adapt 协助适配）\n' >&2
+        return 1
+      fi
+      if [ "$PA_BACKEND" = "wsa" ]; then
+        printf '本机 PA（WSA884x）无手动 boost 控件，由固件管理\n' >&2
+        return 1
+      fi
+      if [ "$PA_BACKEND" != "tfa" ]; then
+        pa_readonly_refusal
+        return 1
+      fi
       if [ "$m" = 2 ]; then
         printf '%s\n' '恢复 boost 上限到出厂满档 MAX_STATE_2'
       else
@@ -2008,27 +2490,32 @@ do_pa() {
         off) v=0 ;;
         *)   pa_usage; return 1 ;;
       esac
-      if [ "$v" = 1 ]; then
+      if ! pa_detect; then
+        printf 'Smart PA: 未识别（回传 hifi adapt 协助适配）\n' >&2
+        return 1
+      fi
+      if [ "$PA_BACKEND" != "tfa" ] && [ "$PA_BACKEND" != "wsa" ]; then
+        pa_readonly_refusal
+        return 1
+      fi
+      if [ "$v" = 1 ] && [ "$PA_BACKEND" = "wsa" ]; then
+        printf '%s\n' '开启 WSA VI 电压电流回读（AIF_VI Mixer），供高级用户读取'
+      elif [ "$v" = 1 ]; then
         printf '%s\n' '开启 VI 电压电流回读（控件 316+317），供高级用户配合第三方工具读取'
       fi
       # write the DIGIT: the old tinymix refuses enum words on BOOL controls
       # ("Error: only enum types can be set with strings", exit 22) while both
       # dialects accept 1/0 -- pa_set's BOOL normalisation then matches the
       # digit against whatever the read-back echoes (On/Off or 1/0)
-      if pa_set $TM_VI_1 "$v" && pa_set $TM_VI_2 "$v"; then
-        if [ "$v" = 1 ]; then
-          printf 'VI 回读已开启，数据口 /dev/tfa_rw（需 root 自行解析 DSP 帧）\n'
-        else
-          printf 'VI 回读已关闭\n'
-        fi
-      else
-        printf '!! 写入失败：本机可能无 TFA smart PA 或控件号不同，功能不可用\n' >&2
-        return 1
-      fi ;;
+      case "$PA_BACKEND" in
+        wsa) pa_wsa_set_vi "$v" ;;
+        *)   pa_tfa_set_vi "$v" ;;
+      esac
+      case "$PA_BACKEND:$?" in wsa:0|tfa:0) return 0 ;; *) return 1 ;; esac ;;
     algo|mute|stop|calib|profile)
       # hard refusals: these controls burn / mute / stop or de-calibrate the
       # speaker -- they are never exposed, not even as a "helpful" option
-      printf '!! 已拒绝：控件 3178 ALGO_STATUS / 3175 Mute / 3176 Stop / 3177 Calibration / 3174 换挡 是扬声器安全红线，本模块永不提供\n' >&2
+      printf '!! 已拒绝：ALGO_STATUS / Mute / Stop / Calibration / 换挡 类控件是扬声器安全红线，本模块永不提供\n' >&2
       return 1 ;;
     *)
       pa_usage ;;
@@ -2230,13 +2717,18 @@ HiFi SRC Bypass  (universal)   v${_uv}
                            (if the speaker goes silent, run: hifi speaker auto)
   hifi speaker auto        back to the factory speaker behaviour (16-bit, auto rate)
   hifi speaker status      current speaker knobs + the vendor DSP check of probe [9]
-  hifi pa                  smart PA (TFA9874) status overview (read-only)
+  hifi pa                  smart PA status overview (read-only; auto-detects
+                           TFA9874 / Qualcomm WSA / Awinic / CS35L / MTK)
   hifi pa status           same as above
   hifi pa scan             snapshot the PA state to the state dir (WebUI poll)
-  hifi pa gain <0..6>      loudspeaker PA gain tier via tinymix control 23
-                           (POWER WARNING printed first; 0 / reset = factory)
-  hifi pa boost <1|2>      boost max state via controls 24+25 (2 = factory)
-  hifi pa vi <on|off>      VI voltage/current feedback switches (316+317)
+  hifi pa gain <0..6>      loudspeaker PA gain tier (TFA: control 23; WSA884x:
+                           RX volume = 84 - 2N, factory = 84)
+                           (POWER WARNING printed first; 0 / reset = factory;
+                           read-only backends refuse with an adapt pointer)
+  hifi pa boost <1|2>      boost max state via controls 24+25 (2 = factory);
+                           WSA has no manual boost -- firmware-managed
+  hifi pa vi <on|off>      VI voltage/current feedback switches
+                           (TFA 316+317 / WSA AIF_VI Mixer)
   hifi bootmode            show the boot safety-net state (normal/discover-only/degraded)
   hifi apply               TURN ON : patch + mount, persists across reboots
   hifi restore             TURN OFF: unmount, back to factory, module stays

@@ -1714,6 +1714,29 @@ esac
 [ -z "$_SP_EVID" ] && printf '  （无内核日志/sysfs/厂商库线索；dmesg 需要 root，非 root 下信息更少）\n'
 unset _SP_MODEL _SP_EVID _dm _d _l
 
+# --- 8·A2 PA mixer 控件快照（社区回传 → 新机型映射的数据源） ------------------
+#
+# `hifi pa scan` 的全量 snapshot + tinymix dump 里所有 PA 相关控件的原始行
+# （tfa / wsa / aw_ / cs35 / smartpa，大小写不敏感）。这是纯读操作：
+# 用户把 [8] 段整段贴回，维护者就能从控件名直接推新的后端映射。
+printf '\n--- PA mixer 控件快照（回传用：贴回本段即可帮忙适配新机型）---\n'
+if command -v tinymix >/dev/null 2>&1; then
+  _pa_snap="$STATE/pa.txt"
+  if [ -r "$_pa_snap" ]; then
+    printf '  -- hifi pa scan 快照 (%s) --\n' "$_pa_snap"
+    sed 's/^/  /' "$_pa_snap"
+  else
+    printf '  （无 %s 快照：先执行一次 hifi pa scan 可让本段更完整）\n' "$_pa_snap"
+  fi
+  printf '  -- tinymix dump 中的 PA 相关控件 --\n'
+  tinymix 2>/dev/null | tr -d '\r' | grep -iE 'tfa|wsa|aw_|awinic|cs35|smartpa|speaker boost' | sed 's/^/  /'
+  _pa_hits_n="$(tinymix 2>/dev/null | tr -d '\r' | grep -icE 'tfa|wsa|aw_|awinic|cs35|smartpa|speaker boost')"
+  [ "$_pa_hits_n" -eq 0 ] && printf '  （dump 中无 PA 相关控件：本机 PA 可能不经 mixer 暴露）\n'
+  unset _pa_snap _pa_hits_n
+else
+  printf '  （tinymix 不可用：本段跳过）\n'
+fi
+
 # --- 8·B USB offload 检测（本模块 USB 解锁会不会被 ADSP 旁路） ---------------
 #
 # 高通 USB offload（ADSP 直驱 USB，内核 qc_audio_offload / snd-usb-audio-qcom）
