@@ -23,6 +23,16 @@
 # ==============================================================================
 MODDIR="${0%/*}"
 HIFI="$MODDIR/bin/hifi"
+
+# P0 hardening (v2.0.0 device test finding): every controller invocation from
+# this script must be time-bounded.  A conflicting module can make any single
+# call hang (the K20 Pro test showed a 90s stall per call -> minutes of black
+# screen at boot).  post-fs-data already bounds `hifi boot` at 8s; the
+# late_start calls here were unprotected.  Bounds: probe/diag calls 10s,
+# apply/restore 30s (legitimate apply can be slow on low-end storage).
+hifi_t() { _t="$1"; shift; timeout "$_t" sh "$HIFI" "$@"; }
+hifi_q() { _t="$1"; shift; timeout "$_t" sh "$HIFI" "$@" >/dev/null 2>&1; }
+
 STATE="${HIFI_STATE:-/data/adb/hifi_src_bypass}"
 LOG="$STATE/last.log"
 
@@ -31,7 +41,7 @@ LOG="$STATE/last.log"
   snap() {
     [ -r "$HIFI" ] || exit 0
     HIFI_REPORT_WHY="late-start${1:+: $1}" \
-      sh "$HIFI" report >> "$LOG" 2>&1
+      hifi_t 10 report >> "$LOG" 2>&1
     exit 0
   }
 
@@ -71,8 +81,8 @@ LOG="$STATE/last.log"
     echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: audioserver not healthy, unmounting patch (P0-4)" >> "$LOG"
     # P0-5: restore must never touch the audio stack (it may be crash-looping).
     # RESTART is persisted config, so zero it for this run without saving.
-    HIFI_RESTART=0 sh "$HIFI" set restart 0 >> "$LOG" 2>&1
-    HIFI_RESTART=0 sh "$HIFI" restore >> "$LOG" 2>&1
+    HIFI_RESTART=0 hifi_t 10 set restart 0 >> "$LOG" 2>&1
+    HIFI_RESTART=0 hifi_t 30 restore >> "$LOG" 2>&1
     _bf="$STATE/bootfail.count"
     _n=0
     [ -r "$_bf" ] && _n="$(cat "$_bf" 2>/dev/null)"
@@ -81,7 +91,7 @@ LOG="$STATE/last.log"
     printf '%s\n' "$_n" > "$_bf" 2>/dev/null
     if [ "$_n" -ge 2 ]; then
       echo "$(date '+%Y-%m-%d %H:%M:%S') BOOTFAIL-CIRCUIT-BREAK: $_n consecutive unhealthy boots, disabling auto-apply" >> "$LOG"
-      sh "$HIFI" set enabled 0 >> "$LOG" 2>&1
+      hifi_t 10 set enabled 0 >> "$LOG" 2>&1
       rm -f "$STATE/boot_degraded" 2>/dev/null
     fi
     snap "audioserver unhealthy (P0-4 unmount, bootfail=$_n)"
@@ -99,13 +109,13 @@ LOG="$STATE/last.log"
   # try once more from scratch instead of staying silently inert
   if [ ! -s "$STATE/targets.lst" ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: no target list, re-running apply" >> "$LOG"
-    sh "$HIFI" set restart 0 >> "$LOG" 2>&1
-    sh "$HIFI" apply >> "$LOG" 2>&1
-    sh "$HIFI" set restart 1 >> "$LOG" 2>&1
+    hifi_t 10 set restart 0 >> "$LOG" 2>&1
+    hifi_t 30 apply >> "$LOG" 2>&1
+    hifi_t 10 set restart 1 >> "$LOG" 2>&1
     snap "no target list"
   fi
 
-  missing="$(sh "$HIFI" missing 2>/dev/null)"
+  missing="$(hifi_t 10 missing 2>/dev/null)"
   case "$missing" in ''|*[!0-9]*) missing=-1 ;; esac
 
   if [ "$missing" = 0 ]; then
@@ -134,8 +144,8 @@ LOG="$STATE/last.log"
 
   echo "$(date '+%Y-%m-%d %H:%M:%S') boot verify: $missing target(s) lost the patch, re-applying" >> "$LOG"
   # a remount means the mount was dropped for real, so no audio restart is needed
-  sh "$HIFI" set restart 0 >> "$LOG" 2>&1
-  sh "$HIFI" apply >> "$LOG" 2>&1
-  sh "$HIFI" set restart 1 >> "$LOG" 2>&1
+  hifi_t 10 set restart 0 >> "$LOG" 2>&1
+  hifi_t 30 apply >> "$LOG" 2>&1
+  hifi_t 10 set restart 1 >> "$LOG" 2>&1
   snap "$missing target(s) re-applied"
 ) &
