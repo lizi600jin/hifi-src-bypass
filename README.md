@@ -71,7 +71,9 @@
 ### v2.0.0 · BIT_PERFECT 输出通道 / Smart PA 功率层 / P0 热修
 
 - **新增 BIT_PERFECT 输出通道（AIDL 专属，双门禁）**：`hifi set bp 1` 声明 Android 14+ BIT_PERFECT 输出通道（`hifi_output`），播放器经 preferred mixer attributes API 请求即得无 AudioFlinger 混音、无 SRC 的 BitPerfect 输出线程。**双门禁：AIDL 方言 + SDK 34+**，任一不满足在 apply 时直接拒绝——不写文件、不挂载、不卡开机；HIDL 机型显示「不适用」不误报
-- **新增 Smart PA 功率层（实验）**：`hifi pa gain 0..6 / boost 1|2 / vi on|off`，WebUI「Smart PA 功率」卡片（红色警示 + 7 档 pill + 二次确认）。仅运行时 tinymix 读写零文件改动；**硬编码拒绝**保护算法/校准/Mute 等危险控件（永不提供）；**仅在 TFA9874 机型可用**，功率超限可造成不可逆硬件损伤，保持出厂 0 档最安全
+- **新增 Smart PA 功率层（实验）**：`hifi pa gain 0..6 / boost 1|2 / vi on|off`，WebUI「Smart PA 功率」卡片（红色警示 + 7 档 pill + 二次确认）。仅运行时 tinymix 读写零文件改动；**硬编码拒绝**保护算法/校准/Mute 等危险控件（永不提供）；功率超限可造成不可逆硬件损伤，保持出厂 0 档最安全
+- **Smart PA 后端注册表（发布前最终修复 · 一加13 真机诊断驱动）**：运行时按控件名探测、不写死控件号——TFA9874（gain/boost/vi 全功能）与 Qualcomm WSA883x/884x（gain/vi，boost 由固件管理，多芯片立体声等值联动写入+逐个回读）可写，awinic / Cirrus / MTK 只读；只读后端绝不盲写，status 如实展示并提示回传 `hifi adapt`（新增 PA 快照段）协助补映射；未识别 PA 统一降级不误报
+- **WebUI 修复与反馈（发布前最终修复）**：裁切编辑器 `bgClamp()` 平移夹紧区间倒挂修复——单指自由拖动、双指/滚轮以触点为不动点缩放恢复正常，双指抬一指后重新锚定不跳变；**PA 档位切换结果弹窗**（成功报档位与 dB，不支持/失败给 ⚠️ 提示）；restore lazy-umount 兜底，busy 文件不再残留挂载（一加13 实测零残留）
 - **P0 开机安全网热修（真机熔断测试后）**：`service.sh` 全部 11 处控制器调用统一包 `hifi_t` 超时包装（probe/set 10s、apply/restore 30s），`post-fs-data.sh` 尾部 report 包 15s 超时——冲突模块拖挂控制器时最坏情况约 2 分钟内完成降级，不卡死引导。Redmi K20 Pro 真机三层熔断 + 恢复路径全部按设计工作
 - **WebUI 档位指引重写**：六个档位 hint 均为三段式（超越原厂 / 操作路径 / 防负优化）
 - **自检 doctor 增强**：新增 ⑥ DSP 位宽注入状态、⑦ P0 开机安全网状态；机型适配校验新增 SmartPA / USB offload / 厂商 DSP 检测；⑤b BIT_PERFECT 方言判定
@@ -106,7 +108,7 @@
 | 机型 | SoC | 系统 | 方言 | 模块版本 | 结果 |
 |---|---|---|---|---|---|
 | Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v2.0.0 | ✅ 三层熔断 + 恢复路径全过（P0 真机验证）；`hifi doctor` 干净；版本史见下方 v1.9.0 数据点 |
-| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10；4/4 HAL 挂载；BP AIDL 双门禁放行；restore 还原正常；doctor rc=0；版本史见下方 v1.9.0 数据点 |
+| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10 策略 + 4/4 HAL 挂载；BP AIDL 双门禁放行；**PA WSA884x 后端 gain/vi 真机全链通过（gain 2 → 80 → reset 84）**；restore 零残留；doctor rc=0；版本史见下方 v1.9.0 数据点 |
 | vivo PD2408 (`V2408A`) | SM8750 (sun) | OriginOS, Android 16 (SDK 36) | QTI AIDL | v1.9.0 | ✅ 2 策略 + 4 HAL 挂载，boot 干净（2026-09-21 社区回传） |
 
 > **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 16 移植澎湃 OS HyperOS）；
@@ -316,6 +318,7 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 
 ### WebUI
 一键预设、单独调混音率/上限/位深、**一键还原**、页内一键校验（= `hifi doctor`）。
+Smart PA 功率卡片的档位切换带结果弹窗反馈（成功/不支持均提示）。
 
 ### 命令行
 
