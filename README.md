@@ -1,6 +1,6 @@
 # HiFi SRC Bypass · 全机型 USB 直通
 
-![HiFi SRC Bypass v2.0.0](out/hero-v2.0.0.svg)
+![HiFi SRC Bypass v2.0.0]
 
 > 全机型通用的 Android 模块：**USB 小尾巴 / 有线耳机高解析直通（SRC 绕过）**。
 > **三层上限一起解** —— ① 音频策略 XML（框架允许分发什么）② USB HAL 库里的采样率常量表（DAC 实际能开到多少）
@@ -319,7 +319,7 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 
 ## 4. 安装
 
-1. 下载本仓库 [`dist/hifi-src-bypass-v2.0.0.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0)
+1. 下载本仓库 https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0
 2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
 3. 重启
 4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
