@@ -106,18 +106,6 @@ SPK_BITS=16
 # behaviour), 24 / 32 = inject on every `hifi apply`.  Pure property layer:
 # no policy file is touched by this knob.
 SPK_DSP_BITS=16
-# BIT_PERFECT output channel (Android 14+ "preferred mixer attributes"):
-# declares one extra mixPort ("hifi_output", flags
-# "AUDIO_OUTPUT_FLAG_BIT_PERFECT BIT_PERFECT") and makes it reachable from every
-# playback route, so a player that REQUESTS bit-perfect output gets a dedicated
-# unmixed / un-resampled AudioFlinger thread.
-# TWO conditions, both required, refused at apply time (before any mount):
-#   1. AIDL audio HAL only (source.android.com preferred-mixer-attr) -- a HIDL
-#      device is refused;
-#   2. Android 14 or newer (SDK >= 34) -- the flag does not exist before that,
-#      so an older or unreadable SDK is refused as well.
-# 0 = off (v1.9.1 behaviour).
-BIT_PERFECT=0
 # Smart PA power layer (NXP TFA9874-class or Qualcomm WSA88xx devices, driven
 # purely through runtime tinymix writes -- zero files, zero mounts).  Empty =
 # never touch the PA (factory behaviour, the safe default).  PA_GAIN=<0..6>
@@ -138,7 +126,6 @@ ALL_BITS="16 24 32"
 ALL_SPK="auto 44100 48000 96000 192000 384000"
 ALL_SPK_BITS="16 24 32"
 ALL_SPKDSP="16 24 32"
-ALL_BP="0 1"
 
 # ------------------------------------------------------------------ candidates
 # Canonical locations, in the order the vendors actually use them.  Every one
@@ -305,15 +292,9 @@ load_conf() {
   for b in $ALL_SPK_BITS; do [ "$b" = "$SPK_BITS" ] && ok=1; done
   [ "$ok" = 1 ] || SPK_BITS=16
   case "$SPK_DSP_BITS" in 16|24|32) ;; *) SPK_DSP_BITS=16 ;; esac
-  case "$BIT_PERFECT" in 0|1) ;; *) BIT_PERFECT=0 ;; esac
   # smart PA knobs: "" (= factory / untouched) or a valid tier, never guessed
   case "$PA_GAIN" in ""|reset|[0-6]) ;; *) PA_GAIN="" ;; esac
   case "$PA_BOOST" in ""|reset|1|2) ;; *) PA_BOOST="" ;; esac
-  # The device's API level, read once per command (pure getprop, no side
-  # effect).  Kept as the raw string: "" = unknown, and the BIT_PERFECT gate
-  # treats unknown as "refuse".  The patcher gets it as -v SDK=, because awk
-  # cannot call getprop.
-  SDK_VER="$(getprop ro.build.version.sdk 2>/dev/null)"
   return 0
 }
 
@@ -347,15 +328,6 @@ SPK_RATE=$SPK_RATE
 #              (16 / 24 / 32).  16 = 保持原厂 (mixer-class ports get nothing
 #              added), 24 / 32 = 补齐 24 / 32-bit 到扬声器/听筒端口.
 SPK_BITS=$SPK_BITS
-# BIT_PERFECT : 1 = declare the Android 14+ BIT_PERFECT output channel
-#              ("hifi_output" mixPort + playback routes).  需要同时满足:
-#              ① AIDL 方言 (Android 官方仅 AIDL audio HAL 支持 BIT_PERFECT);
-#              ② Android 14+ (SDK 34+) —— 该 flag 在 Android 14 才引入。
-#              任一不满足（含取不到 ro.build.version.sdk）都会在应用时被
-#              拒绝，且不改动任何文件、不挂载任何东西。播放器需用
-#              preferred mixer attributes API 请求，不请求则走原混音路径，
-#              无副作用。0 = 关闭.
-BIT_PERFECT=$BIT_PERFECT
 # SPK_DSP_BITS : ADSP bit-width enforce mode.  Injected as the system
 #              property persist.vendor.audio_hal.dsp_bit_width_enforce_mode
 #              on every apply (24 / 32).  16 = nothing is injected; a value
@@ -531,30 +503,8 @@ enter_global_ns() {
 
 # ============================================================== generate patch
 # Patch one file.  $1 = live path, $2 = patched output, $3 = stock archive.
-# Echoes nothing; sets GEN_RC (0 = changed and verified, 2 = BIT_PERFECT
-# refused, 3 = no patchable port, 4 = nothing to change, 1 = rejected).
-# Dialect probe for the BIT_PERFECT gate (read-only): classify a policy XML
-# by the same rule patch_policy.awk uses in its END block -- count pcmType=
-# (QTI/AIDL) vs format="AUDIO_FORMAT_ (AOSP/HIDL) attributes on live markup.
-# Prints "qti", "aosp", or "" (not a policy file).
-dialect_of() {
-  awk '
-    { ln = $0
-      while (1) {
-        p = index(ln, "<!--")
-        if (p == 0) break
-        q = index(substr(ln, p), "-->")
-        if (q == 0) { ln = substr(ln, 1, p - 1); break }
-        ln = substr(ln, 1, p - 1) substr(ln, p + q + 2)
-      }
-      if (ln ~ /pcmType="/) qti++
-      else if (ln ~ /format="AUDIO_FORMAT_/) aosp++
-    }
-    END {
-      if (qti == 0 && aosp == 0) exit 3
-      print (qti >= aosp) ? "qti" : "aosp"
-    }' "$1" 2>/dev/null
-}
+# Echoes nothing; sets GEN_RC (0 = changed and verified, 3 = no patchable port,
+# 4 = nothing to change, 1 = rejected).
 
 gen_one() {
   case "$1" in
@@ -658,7 +608,6 @@ gen_policy() {
 
   awk -v MARKER="$MARKER" -v MIXER="$MIXER_RATE" -v CEIL="$MAX_RATE" -v BITS="$BIT_DEPTH" \
       -v HIFI="$HIFI_RATE" -v SPK="$SPK_RATE" -v SPKBITS="$SPK_BITS" \
-      -v BP="$BIT_PERFECT" -v SDK="$SDK_VER" \
       -v VER="$MODVER" -v STOCKPATH="$live" \
       -f "$PATCHER" "$stk" > "$out.tmp" 2> "$STATE/.patch.err"
   rc=$?
@@ -668,16 +617,6 @@ gen_policy() {
     [ "$made_archive" = 1 ] && rm -f "$stk"
     GEN_RC=3
     return 3
-  fi
-  if [ "$rc" = 2 ]; then
-    # BIT_PERFECT refused: the file's dialect is HIDL, or the device's SDK is
-    # below 34 / could not be read.  The patcher writes its own reason to
-    # stderr before exiting, so surface that instead of guessing here.
-    rm -f "$out.tmp"
-    [ "$made_archive" = 1 ] && rm -f "$stk"
-    log "!! BIT_PERFECT refused on $live: $(cat "$STATE/.patch.err" 2>/dev/null | head -n1)"
-    GEN_RC=2
-    return 2
   fi
   if [ "$rc" = 4 ]; then
     rm -f "$out.tmp" "$out"
@@ -693,7 +632,7 @@ gen_policy() {
 
   # ---- structure check: refuse to mount anything that is not a pure
   #      profile-level rewrite of the factory file
-  chk="$(awk -v MARKER="$MARKER" -v BP="$BIT_PERFECT" -f "$CHECKER" "$stk" "$out.tmp" 2>&1)"
+  chk="$(awk -v MARKER="$MARKER" -f "$CHECKER" "$stk" "$out.tmp" 2>&1)"
   crc=$?
   if [ "$crc" != 0 ]; then
     log "!! REJECTED $live"
@@ -1061,26 +1000,6 @@ targets_brief() {
   printf '%s' "$out"
 }
 
-# the dialect of this device's primary policy file ("" = unknown)
-current_dialect() {
-  if [ -r "$TGT" ]; then
-    while IFS='|' read -r live patched stk; do
-      [ -n "$live" ] || continue
-      is_hal_target "$live" && continue
-      [ -r "$stk" ] || continue
-      d="$(dialect_of "$stk")"
-      [ -n "$d" ] && { printf '%s' "$d"; return 0; }
-    done < "$TGT"
-  fi
-  for f in $(candidate_list); do
-    case "$f" in *.so) continue ;; esac
-    [ -r "$f" ] || continue
-    d="$(dialect_of "$f")"
-    [ -n "$d" ] && { printf '%s' "$d"; return 0; }
-  done
-  return 0
-}
-
 status_json() {
   n_ok="$(count_applied)"
   n_all="$(count_targets)"
@@ -1115,8 +1034,6 @@ status_json() {
   printf '  "bit_depth": %s,\n' "$BIT_DEPTH"
   printf '  "spk_rate": "%s",\n' "$SPK_RATE"
   printf '  "spk_bits": %s,\n' "$SPK_BITS"
-  printf '  "bit_perfect": %s,\n' "$BIT_PERFECT"
-  printf '  "dialect": "%s",\n' "$(current_dialect)"
   printf '  "spk_dsp_bits": %s,\n' "$SPK_DSP_BITS"
   # smart PA knobs are reported from the CONFIG, never from tinymix: the WebUI
   # must not depend on root-only mixer control reads
@@ -1162,7 +1079,6 @@ do_status() {
   else
     mnt="inactive (factory policy in use)"
   fi
-  DIALECT="$(current_dialect)"
   if [ "$HAL_PATCH" != 1 ]; then
     hal_txt="disabled (policy XML only)"
   elif [ "$(count_hal)" = 0 ]; then
@@ -1186,7 +1102,6 @@ HiFi SRC Bypass  (universal USB / wired SRC bypass)
   bit depth      : ${BIT_DEPTH}bit -> $(bitdepth_profiles "$BIT_DEPTH")
   speaker rate   : $SPK_RATE$([ "$SPK_RATE" = auto ] && echo " (factory)")$([ "$SPK_RATE" != auto ] && echo " Hz (pinned)")
   speaker bits   : ${SPK_BITS}bit$([ "$SPK_BITS" = 16 ] && echo " (factory)" || echo " -> speaker/earpiece ports extended to ${SPK_BITS}bit")
-  bit-perfect    : $([ "$BIT_PERFECT" = 1 ] && echo on || echo off) (dialect: ${DIALECT:-unknown}, sdk: ${SDK_VER:-unknown})$([ "$BIT_PERFECT" = 1 ] && [ "${DIALECT:-}" != "qti" ] && echo "  !! HIDL: will be refused")$([ "$BIT_PERFECT" = 1 ] && [ "${DIALECT:-}" = "qti" ] && { [ -z "$SDK_VER" ] || [ "$SDK_VER" -lt 34 ] 2>/dev/null; } && echo "  !! Android 14+ (SDK 34+) required: will be refused")
   ceilings avail : $ALL_RATES
   bitdepth avail : $ALL_BITS
   dsp enforce    : $SPK_DSP_BITS$([ "$SPK_DSP_BITS" = 16 ] && echo " (off: no property injected)" || echo " -> persist.vendor.audio_hal.dsp_bit_width_enforce_mode=$SPK_DSP_BITS on apply")
@@ -1406,54 +1321,6 @@ do_boot() {
 do_apply() {
   enter_global_ns apply
   load_conf
-  # ---- BIT_PERFECT gate (BP=1): TWO tests, both required, and the whole
-  #      apply is refused up front so a half-applied state can never exist.
-  #      Order matters and matches patch_policy.awk's END block exactly:
-  #        1. DIALECT -- Android honours the flag on the AIDL audio HAL only.
-  #           Probe the primary policy file the same way the patcher classifies
-  #           it ("qti" = AIDL, anything else = HIDL/AOSP/unknown).
-  #        2. SDK     -- the flag does not exist before Android 14 (SDK 34),
-  #           and an UNREADABLE version is refused too: refusing costs nothing
-  #           (no target is written, nothing is mounted) whereas proceeding
-  #           would aim an unknown flag at a framework we cannot even date.
-  if [ "$BIT_PERFECT" = 1 ]; then
-    bp_dia=""
-    if [ -r "$TGT" ]; then
-      while IFS='|' read -r live patched stk; do
-        [ -n "$live" ] || continue
-        is_hal_target "$live" && continue
-        [ -r "$stk" ] || continue
-        bp_dia="$(dialect_of "$stk")"
-        [ -n "$bp_dia" ] && break
-      done < "$TGT"
-    else
-      for f in $(candidate_list); do
-        case "$f" in *.so) continue ;; esac
-        [ -r "$f" ] || continue
-        bp_dia="$(dialect_of "$f")"
-        [ -n "$bp_dia" ] && break
-      done
-    fi
-    if [ "$bp_dia" != "qti" ]; then
-      log "!! BIT_PERFECT refused: this device is the HIDL dialect -- Android officially supports BIT_PERFECT on the AIDL audio HAL only (Android 14+, SDK 34+)"
-      echo "此机型是 HIDL 方言，BIT_PERFECT 不支持（Android 官方仅 AIDL audio HAL 支持，且需要 Android 14+）—— 已拒绝（未改动任何文件）。本机其余档位不受影响。" >&2
-      return 1
-    fi
-    case "$SDK_VER" in
-      ''|*[!0-9]*)
-        log "!! BIT_PERFECT refused: cannot determine this device's Android version (no ro.build.version.sdk) -- the flag needs Android 14+ (SDK 34+), refusing rather than exposing an unknown framework to it"
-        echo "BIT_PERFECT 需要 Android 14+ (SDK 34+)；无法确认本机版本（取不到 ro.build.version.sdk）—— 为避免写入框架不认识的属性，已拒绝（未改动任何文件）。本机其余档位不受影响。" >&2
-        return 1
-        ;;
-    esac
-    if [ "$SDK_VER" -lt 34 ] 2>/dev/null; then
-      log "!! BIT_PERFECT refused: this device reports SDK $SDK_VER -- the flag needs Android 14+ (SDK 34+) and its framework does not support it"
-      echo "BIT_PERFECT 需要 Android 14+ (SDK 34+)；本机 SDK $SDK_VER —— 该功能不受框架支持，已拒绝（未改动任何文件）。本机其余档位不受影响。" >&2
-      return 1
-    fi
-    log "BIT_PERFECT channel declared: a player must request it via the preferred mixer attributes API (Android 14+); without a request playback takes the normal mixing path -- no side effects"
-    echo "已声明 BIT_PERFECT 通道：需要播放器用 preferred mixer attributes API 请求（Android 14+），不请求则走原混音路径，无副作用"
-  fi
   # `apply` is an explicit "turn it on": clear a previous restore and persist
   # it, otherwise a one-tap restore would silently swallow every later apply.
   if [ "$ENABLED" != 1 ]; then
@@ -1588,12 +1455,6 @@ do_set() {
       for b in $ALL_SPK_BITS; do [ "$b" = "$val" ] && ok=1; done
       [ "$ok" = 1 ] || { echo "spkbits must be one of: $ALL_SPK_BITS"; return 1; }
       SPK_BITS="$val" ;;
-    bitperfect|bit_perfect|bp)
-      case "$val" in
-        1|on|true)  BIT_PERFECT=1 ;;
-        0|off|false) BIT_PERFECT=0 ;;
-        *) echo "bitperfect must be 0 or 1"; return 1 ;;
-      esac ;;
     spkdsp|spk_dsp_bits)
       ok=0
       for b in $ALL_SPKDSP; do [ "$b" = "$val" ] && ok=1; done
@@ -1622,7 +1483,7 @@ do_set() {
   save_conf
   printf '%s = %s\n' "$key" "$val"
   case "$key" in
-    max|max_rate|bitdepth|bits|bit_depth|spkbits|spk_bits|hal|hal_patch|bitperfect|bit_perfect|bp)
+    max|max_rate|bitdepth|bits|bit_depth|spkbits|spk_bits|hal|hal_patch)
       printf 'run: hifi apply   (and, for a changed ceiling, hifi restore first)\n' ;;
     spk|spk_rate)
       printf 'run: hifi apply\n' ;;
@@ -2898,12 +2759,6 @@ HiFi SRC Bypass  (universal)   v${_uv}
                            16 = off, injected on apply, cleared on restore)
   hifi set spkbits 24      speaker / earpiece bit-depth ceiling (16 / 24 / 32),
                            16 = 保持原厂
-  hifi set bitperfect 1    declare the Android 14+ BIT_PERFECT output channel
-                           (needs BOTH an AIDL audio HAL and Android 14+ /
-                           SDK 34+; otherwise the apply is refused, touching
-                           nothing).  A player must request it via the
-                           preferred mixer attributes API -- without a request
-                           nothing changes (alias: hifi set bp 1)
   hifi set restart 1       restart the audio stack after applying (1 / 0)
   hifi set enabled 0       boot-time intent only (advanced)
   hifi set hal 1           also unlock the USB HAL library's own rate table (1 / 0)
@@ -2958,8 +2813,8 @@ case "${1:-status}" in
   status)     ensure_dirs; load_conf; do_status ;;
   dac)        ensure_dirs; load_conf; cmd_dac ;;
   json)       ensure_dirs; load_conf; status_json ;;
-  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\nspk options     : %s\nspkbit options  : %s\nspkdsp options  : %s\nbp options      : %s\n' \
-                     "$ALL_RATES" "$ALL_MIXER" "$ALL_HIFI" "$ALL_BITS" "$ALL_SPK" "$ALL_SPK_BITS" "$ALL_SPKDSP" "$ALL_BP" ;;
+  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\nspk options     : %s\nspkbit options  : %s\nspkdsp options  : %s\n' \
+                     "$ALL_RATES" "$ALL_MIXER" "$ALL_HIFI" "$ALL_BITS" "$ALL_SPK" "$ALL_SPK_BITS" "$ALL_SPKDSP" ;;
   scan)       ensure_dirs; load_conf; prepare || true; do_ports ;;
   ports)      ensure_dirs; load_conf; do_ports ;;
   files)      ensure_dirs; load_conf; do_files ;;

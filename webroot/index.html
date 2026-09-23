@@ -100,11 +100,11 @@
     <div class="field">
       <label>HiFi 通道率（USB 实际通路）</label>
       <p class="hint">插上小尾巴后 USB 音频<strong>不走混音器</strong>，走厂商 HiFi 端口（如 <code>hifi_playback</code>）。<br>
-      <strong>怎么选</strong>：钉在<strong>你正在听的音源采样率</strong>上，该率即<strong>比特完美</strong> —— 网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz（推荐）</strong>，96k 母带选 96 kHz。<br>
+      <strong>怎么选</strong>：钉在<strong>你正在听的音源采样率</strong>上，该率即<strong>零重采样直出</strong> —— 网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz（推荐）</strong>，96k 母带选 96 kHz。<br>
       其余率只会上采样、不丢内容，<strong>永远不要往下选</strong>（有损下采样）；<code>auto</code>＝原厂行为。
       <br>
       <strong>超越原厂</strong>：原厂 HiFi 端口<strong>永远跟着 DAC 最大能力走</strong>，任何音源都被拉到最高率重采样 ——
-      把它钉到<strong>你曲库的采样率</strong>，该率内容<strong>比特完美直出</strong>（192k 母带 / 臻品音质即真无损全链路）。
+      把它钉到<strong>你曲库的采样率</strong>，该率内容<strong>免重采样直出</strong>（192k 母带 / 臻品音质即真无损全链路）。
       <br>
       <strong>操作</strong>：听 192k 母带选 <strong>192 kHz</strong>，96k 母带选 96 kHz；曲库以 44.1k 为主则钉
       <strong>44.1 kHz</strong>（母带内容走 4 倍整数升采样，无损折算）。播放时在「深度校验 5b」看到
@@ -178,24 +178,6 @@
       </div>
     </div>
 
-    <div class="field">
-      <label>BIT_PERFECT 输出通道（实验 · 需 Android 14+ 与 AIDL）</label>
-      <p class="hint">声明 Android 14+ 的 <strong>BIT_PERFECT 输出通道</strong>（<code>hifi_output</code>）并接入播放路由：播放器用 <code>preferred mixer attributes</code> API 请求即<strong>免混音、免重采样</strong>，直出比特完美。<br>
-      <strong>需同时满足两项</strong>：<strong>Android 14+（SDK 34+）</strong>与 <strong>AIDL 方言</strong>；HIDL 老机型、移植 ROM 即使版本新也不支持，取不到版本号时同样按不满足处理。<br>
-      <strong>不满足时开启没有任何损失</strong>：应用时被拒绝，不写文件、不挂载、<strong>不会卡开机、不会死机重启</strong>，本机其余档位照常生效。<br>
-      <strong>怎么选</strong>：关闭＝原厂；想验证就开启，再到播放器侧主动请求（<strong>实验</strong>，未请求走原混音路径，无副作用）。
-      <br>
-      <strong>超越原厂</strong>：这是全模块<strong>最高一级</strong>的正优化 —— 免混音、免重采样、直出比特完美，
-      原厂任何通路都做不到。<br>
-      <strong>操作</strong>：确认满足「Android 14+（SDK 34+）+ AIDL 方言」双条件后在<strong>支持该 API 的播放器</strong>里
-      启用独占 / preferred mixer attributes 输出，深度校验 ⑤b 不再显示「不适用」即接入成功。
-      注意：BP 通道通常<strong>锁定最大音量、绕过系统音量曲线</strong>，音量交给播放器控制 —— 不支持的播放器开启后可能出现音量异常。</p>
-      <p class="hint" id="bpDialect" hidden></p>
-      <div class="pills" id="pillBp">
-        <button class="pill" data-bp="0">关闭<em>不声明通道 · 等同原厂</em></button>
-        <button class="pill" data-bp="1">开启（实验）<em>需要播放器主动请求</em></button>
-      </div>
-    </div>
 
     <div class="field row">
       <div>

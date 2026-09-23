@@ -68,15 +68,14 @@
 
 ## 📋 变更日志（Changelog）
 
-### v2.0.0 · BIT_PERFECT 输出通道 / Smart PA 功率层 / P0 热修
+### v2.0.0 · Smart PA 功率层 / P0 热修
 
-- **新增 BIT_PERFECT 输出通道（AIDL 专属，双门禁）**：`hifi set bp 1` 声明 Android 14+ BIT_PERFECT 输出通道（`hifi_output`），播放器经 preferred mixer attributes API 请求即得无 AudioFlinger 混音、无 SRC 的 BitPerfect 输出线程。**双门禁：AIDL 方言 + SDK 34+**，任一不满足在 apply 时直接拒绝——不写文件、不挂载、不卡开机；HIDL 机型显示「不适用」不误报
 - **新增 Smart PA 功率层（实验）**：`hifi pa gain 0..6 / boost 1|2 / vi on|off`，WebUI「Smart PA 功率」卡片（红色警示 + 7 档 pill + 二次确认）。仅运行时 tinymix 读写零文件改动；**硬编码拒绝**保护算法/校准/Mute 等危险控件（永不提供）；功率超限可造成不可逆硬件损伤，保持出厂 0 档最安全
 - **Smart PA 后端注册表（发布前最终修复 · 一加13 真机诊断驱动）**：运行时按控件名探测、不写死控件号——TFA9874（gain/boost/vi 全功能）与 Qualcomm WSA883x/884x（gain/vi，boost 由固件管理，多芯片立体声等值联动写入+逐个回读）可写，awinic / Cirrus / MTK 只读；只读后端绝不盲写，status 如实展示并提示回传 `hifi adapt`（新增 PA 快照段）协助补映射；未识别 PA 统一降级不误报
 - **WebUI 修复与反馈（发布前最终修复）**：裁切编辑器 `bgClamp()` 平移夹紧区间倒挂修复——单指自由拖动、双指/滚轮以触点为不动点缩放恢复正常，双指抬一指后重新锚定不跳变；**PA 档位切换结果弹窗**（成功报档位与 dB，不支持/失败给 ⚠️ 提示）；restore lazy-umount 兜底，busy 文件不再残留挂载（一加13 实测零残留）
 - **P0 开机安全网热修（真机熔断测试后）**：`service.sh` 全部 11 处控制器调用统一包 `hifi_t` 超时包装（probe/set 10s、apply/restore 30s），`post-fs-data.sh` 尾部 report 包 15s 超时——冲突模块拖挂控制器时最坏情况约 2 分钟内完成降级，不卡死引导。Redmi K20 Pro 真机三层熔断 + 恢复路径全部按设计工作
 - **WebUI 档位指引重写**：六个档位 hint 均为三段式（超越原厂 / 操作路径 / 防负优化）
-- **自检 doctor 增强**：新增 ⑥ DSP 位宽注入状态、⑦ P0 开机安全网状态；机型适配校验新增 SmartPA / USB offload / 厂商 DSP 检测；⑤b BIT_PERFECT 方言判定
+- **自检 doctor 增强**：新增 ⑥ DSP 位宽注入状态、⑦ P0 开机安全网状态；机型适配校验新增 SmartPA / USB offload / 厂商 DSP 检测
 
 ### v1.9.2 · 稳定线（P0 安全网 + WebUI 背景图系统）
 
@@ -84,7 +83,7 @@
 - **`spkdsp` 扬声器 ADSP 位宽强制**：`hifi set spkdsp 24`（16/24/32）→ 属性层强制 QTI HAL 的 ADSP ASM 流位宽，纯属性零文件改动，restore 恒清除
 - **WebUI 背景图系统**：固定背景层 + 3 内置预设 / 3 自定义槽 + 相册式所见即所得裁切编辑器 + 面板透明度滑杆（默认 50%），设置持久化于 localStorage
 - **报告人话解码**：设备报告 HAL 行由裸 rc 码改为 `[ALREADY-UNLOCKED]` 等状态词
-- **不含** BIT_PERFECT 与 Smart PA（BP 在稳定线物理不可达：`ALL_BP="0"`，WebUI 不暴露入口），适合保守用户
+- **不含** Smart PA（稳定线不暴露 PA 层，WebUI 无入口），适合保守用户
 
 ### v1.9.0 · 2026-09-20 · 扬声器档位 / 位深
 

@@ -4,12 +4,9 @@
 #   awk -v MARKER=... -v MIXER=48000 -v CEIL=384000 -v BITS=32 -v VER=1.1 \
 #       -v HIFI=192000 \
 #       -v STOCKPATH=/odm/etc/audio/audio_module_config_primary.xml \
-#       -v BP=1 -v SDK=34 \
 #       -f patch_policy.awk  <stock.xml>  >  <patched.xml>
 #
 #   exit 0 = patched output written, at least one port was modified
-#   exit 2 = BP=1 refused (wrong dialect or SDK < 34); NOT ONE output line was
-#            written, so the caller's output file stays empty -- zero half state
 #   exit 3 = not an audio policy file (no profile line with a known format)
 #   exit 4 = recognised, but nothing here needed changing
 #
@@ -20,39 +17,6 @@
 #            which overrides the dynamic query.  Verified on a Redmi K20 Pro
 #            (Android 16): the live port went 384000 -> 192000 Hz, so a 192k
 #            source plays with zero resampling instead of an upsampling 2x.
-#
-#   BP     : 1 = declare the Android 14+ BIT_PERFECT output channel.  ONE new
-#            mixPort ("hifi_output") is appended to the primary module and its
-#            name is added to the sources of every sink mix-route, so a player
-#            can claim the port through the "preferred mixer attributes" API
-#            (Android 14+) and get a BitPerfect output thread -- mixed output
-#            with no AudioFlinger mixer and no SRC.
-#
-#            TWO conditions must BOTH hold, tested in this order so the
-#            messages never blur into each other:
-#              1. DIALECT -- officially supported on the AIDL audio HAL only
-#                 (source.android.com/docs/core/audio/preferred-mixer-attr),
-#                 i.e. this patcher's "qti" dialect.  A HIDL/AOSP file is
-#                 refused first.
-#              2. SDK (Android version) -- the flag does not exist before
-#                 Android 14.  Checked against official AOSP policy schemas:
-#                 AUDIO_OUTPUT_FLAG_BIT_PERFECT is enumerated in every AIDL
-#                 lineage schema from aidl-14 / lineage-21.0 onward
-#                 (14, 21.0, 22.0, 22.2, 23.0, 23.2) and in none of the HIDL
-#                 ones (6.0, 7.0, 7.1).  The AIDL audio HAL core interface also
-#                 landed in Android 14, so an AIDL HAL below that level is not a
-#                 population worth chasing.  Refused when SDK < 34.
-#
-#            SDK is passed in by the caller (-v SDK=...) because awk is a pure
-#            text processor and cannot call getprop.  An UNKNOWN SDK (absent,
-#            empty or non-numeric) is REFUSED, deliberately: refusing is the
-#            zero-side-effect path (no output line is ever produced) while
-#            proceeding would hand an unknown framework a flag it may not
-#            know.  Both refusals leave the caller's output file EMPTY.
-#            Without a player request the extra port is inert: playback takes
-#            the stock mixing path and nothing else changes.
-#            BP unset / 0 = exactly the v1.9.1 behaviour, byte for byte --
-#            neither the dialect nor the SDK test is even evaluated.
 #
 # WHY THIS EXISTS
 #   The previous generation of this module shipped a *device* template: a full
@@ -123,32 +87,6 @@ BEGIN {
   # 24 / 32 lifts the historical "no bit-depth fill on mixer class" exclusion
   # for the speaker / earpiece *device* ports (mixer mixPorts stay untouched).
   if (SPKBITS == "") SPKBITS = 16
-  # BIT_PERFECT flag names.  They are carried as a defensive HEDGE, not because
-  # either spelling has been proven wrong:
-  #   * this file family (root <modules>, read by the closed-source Qualcomm
-  #     HAL) ships the SHORT spellings at the factory -- DEEP_BUFFER, FAST,
-  #     "DIRECT COMPRESS_OFFLOAD NON_BLOCKING GAPLESS_OFFLOAD", ...; the AOSP
-  #     XSD rejects those too, so the XSD is NOT this file's arbiter;
-  #   * the AOSP-side files (root <audioPolicyConfiguration>) use the FULL name
-  #     AUDIO_OUTPUT_FLAG_BIT_PERFECT = 0x100000, enumerated from the Android 14
-  #     lineage schema onward.
-  # Which spelling the Qualcomm parser accepts is UNVERIFIED, so emit both (full
-  # first): whichever it recognises gets the bit set, and an unrecognised extra
-  # token is skipped by a maskFromString-style parser.  See the long rationale
-  # above emit_bp().
-  BP_FLAG_FULL  = "AUDIO_OUTPUT_FLAG_BIT_PERFECT"
-  BP_FLAG_SHORT = "BIT_PERFECT"
-  # BP defaults to 0: the v1.9.1 behaviour, byte for byte.  With BP=1 an extra
-  # BIT_PERFECT mixPort ("hifi_output") is declared in the END block -- and
-  # ONLY when BOTH gates hold: the AIDL ("qti") dialect AND SDK >= 34 (the flag
-  # does not exist before Android 14).  The refusal happens there as well,
-  # before any output line is emitted (see the END block / emit_bp below).
-  if (BP == "") BP = 0
-  # SDK: negotiated Android API level of the device, passed in by the caller
-  # (-v SDK="$sdk_val") because awk cannot call getprop.  Left as the raw
-  # string on purpose: "" / non-numeric means "could not be determined" and is
-  # REFUSED by the gate (see the long rationale above emit_bp).
-  BP_FLAGS = BP_FLAG_FULL " " BP_FLAG_SHORT
 }
 
 { N++; L[N] = $0 }
@@ -447,178 +385,6 @@ function emit_hifi(bn, name,   i, k, ind, head, op, b, prof, np, PLN) {
   PORTS = PORTS (PORTS == "" ? "" : ",") "mix:" name "=HIFI"
 }
 
-# ================================================== BIT_PERFECT declaration
-# (BP=1, qti dialect + SDK >= 34 only -- the red line: APPEND-ONLY, everything
-#  stock is carried through unmodified; on any other dialect, or on an older /
-#  unknown SDK, the caller is refused in the END block BEFORE a single output
-#  line exists)
-#
-# ---------------------------------------------------------------------------
-# WHY THE FLAGS STRING CARRIES *TWO* NAMES -- a defensive hedge.
-#
-# WHETHER BIT_PERFECT ACTUALLY TAKES EFFECT IS UNVERIFIED: this file is read by
-# the Qualcomm closed-source audio HAL, and which flag spelling THAT reader
-# accepts has not been established (no AIDL device was available to check for
-# BitPerfect threads in `dumpsys media.audio_flinger`).  Carrying both spellings
-# means either convention sets the bit, and an extra token is tolerated by the
-# parser we can inspect (see (c)).  That is the whole claim: a hedge, not a fix
-# for a demonstrated fault.
-#
-#     flags="AUDIO_OUTPUT_FLAG_BIT_PERFECT BIT_PERFECT"
-#            ^-- the name the AOSP schema enumerates (0x100000)
-#                                   ^-- the short name this file's own ROM uses
-#
-#  (a) The AOSP audio policy XSD enumerates ONLY the long name.  An official
-#      copy of the Android 16 lineage schema (aidl-lineage-23.0.xsd) has one
-#      hit for AUDIO_OUTPUT_FLAG_BIT_PERFECT and none for a bare BIT_PERFECT;
-#      the flag is AUDIO_OUTPUT_FLAG_BIT_PERFECT = 0x100000 in
-#      system/media/audio/include/system/audio-hal-enums.h.  The schema types
-#      `flags` as an xs:list, and a list validates EACH TOKEN on its own -- so
-#      the two-name string does NOT become schema-valid: measured against that
-#      XSD, `BIT_PERFECT` alone and `AUDIO_OUTPUT_FLAG_BIT_PERFECT BIT_PERFECT`
-#      both raise the same two `attribute 'flags'` enumeration errors, while
-#      the long name alone raises none.  Add nothing else to this.
-#  (b) That XSD is nevertheless NOT the authority for this file.  It governs
-#      documents whose root is <audioPolicyConfiguration>; AOSP's own
-#      Serializer.cpp hard-checks that root name (rootName =
-#      "audioPolicyConfiguration", then an xmlStrcmp against the document root,
-#      ALOGE + reject on mismatch).  The file patched here --
-#      /odm/etc/audio/audio_module_config_primary.xml -- has the root
-#      <modules> and is read by the Qualcomm vendor audio HAL, not by that
-#      serializer.  Evidence the XSD is not its yardstick: the factory flags in
-#      this file are ALREADY short-spelled everywhere -- 13 distinct values,
-#      zero long names, in the qti13 fixture and again in a real SM8750 odm
-#      file (DEEP_BUFFER, FAST, "DIRECT COMPRESS_OFFLOAD NON_BLOCKING
-#      GAPLESS_OFFLOAD", ...) -- a convention the AOSP XSD rejects wholesale
-#      (it has no bare DEEP_BUFFER either) and that these devices ship and run
-#      with.  So the XSD cannot be used to conclude anything about whether the
-#      old single short name was honoured here.
-#  (c) TypeConverter<Traits>::maskFromString()
-#      (frameworks/av/media/libmediahelper/include/libmediahelper/TypeConverter.h)
-#      splits the value on whitespace and does
-#          if (fromString(cstr, type)) value |= ...;
-#      -- a bare `if` with NO else: an unrecognised token is skipped SILENTLY,
-#      never an error.  Under that rule an AOSP-style reader that only knows
-#      the long name ignores the second token, and one that only knows the
-#      short name ignores the first, so the two-name form is additive.  A
-#      reader that rejected the WHOLE attribute on an unknown token would lose
-#      the flag -- that risk is exactly why this stays a hedge, and why the
-#      dialect + SDK gates below remain conservative.
-#
-# ONE new mixPort is appended to the primary module:
-#
-#     <mixPort name="hifi_output" role="source" flags="AUDIO_OUTPUT_FLAG_BIT_PERFECT BIT_PERFECT">
-#         <profile samplingRates="..." channelLayouts="LAYOUT_MONO LAYOUT_STEREO"
-#                  formatType="PCM" pcmType="INT_16_BIT" /> ... INT_24/INT_32
-#     </mixPort>
-#
-# The profile set is the same full-rate / full-depth grid the patcher already
-# writes elsewhere (rates = union(factory mixer rates, DEV_POOL) capped at
-# CEIL; depths = 16 plus 24/32 up to BITS).  QTI/AIDL attribute spelling is
-# the only one generated, because a BIT_PERFECT declaration is only honoured
-# on the AIDL audio HAL, and only from Android 14 on.
-#
-# The name is then added to the sources of every type="mix" route whose sink
-# is a devicePort of THIS module (speaker, USB, wired, ...).  Routes are the
-# only place a mixPort becomes reachable; a declared port without a route is
-# dead weight, and appending "hifi_output" to the existing sources list is the
-# additive-only way to make it reachable.  Input/telephony route types and
-# every other line are passed through untouched.
-#
-# Indentation for the new lines is taken from the file itself, so the output
-# stays in the phone's own style.
-function emit_bp(   i, k, j, ind, pref, srcs, body, b, n, no, done, ln2, rw, rwprev, line) {
-  # -- 1. derive the indentation from the first real <mixPort> line ---------
-  ind = "        "
-  pref = "            "
-  for (i = 1; i <= N; i++) {
-    if (CLIVE[i] ~ /^[ \t]*<mixPort[ \t>]/) {
-      ind = L[i]; sub(/[^ \t].*$/, "", ind)
-      for (k = i + 1; k <= N && CLIVE[k] !~ /<\/mixPorts>/; k++) {
-        if (CLIVE[k] ~ /^[ \t]+[^ \t]/) { pref = L[k]; sub(/[^ \t].*$/, "", pref); break }
-      }
-      break
-    }
-  }
-
-  # -- 2. build the new mixPort block, cloning the patcher's own grid -------
-  body = ind "<mixPort name=\"hifi_output\" role=\"source\" flags=\"" BP_FLAGS "\">"
-  for (b = 16; b <= 32; b += 8) {
-    if ((BITS + 0) < b) continue          # respect the user's bit-depth tier
-    body = body "\n" pref "<profile samplingRates=\"" BP_RATES "\" channelLayouts=\"LAYOUT_MONO LAYOUT_STEREO\" formatType=\"PCM\" pcmType=\"" fmt_name(b) "\" />"
-  }
-  body = body "\n" ind "</mixPort>"
-
-  n = split(body, BP_LINES, "\n")
-
-  # -- 3. append the port right after the closing </mixPorts> ---------------
-  #     (single pass, one flag: the guard makes an accidental double run a
-  #      no-op, which is what keeps the second apply byte-identical)
-  # Buffer surgery on O, not a second emission: the END loop has already
-  # re-emitted every stock line (rewritten ports included) into O. All that
-  # is left here is (a) to splice BP_LINES right after the </mixPorts> line
-  # inside O and (b) to append the port name to the PLAYBACK route lines
-  # already sitting in O. Doing it this way keeps the stock pass and the BP
-  # pass strictly ordered and never duplicates a line.
-  # idempotency guard: if the buffer already declares the port (a patched
-  # file being re-run), nothing in this function may fire again.
-  already = 0
-  for (j = 1; j <= ON; j++) if (O[j] ~ /<mixPort name="hifi_output"/) already = 1
-  if (already) {
-    # re-run on a patched file: never duplicate the port, but keep the
-    # provenance tag so the header stays descriptive
-    if (PORTS !~ /mix:hifi_output=BITPERFECT/) {
-      PORTS = PORTS (PORTS == "" ? "" : ",") "mix:hifi_output=BITPERFECT"
-      CHANGED = 1
-    }
-    return
-  }
-  done = 0
-  no = 0
-  for (j = 1; j <= ON; j++) {
-    ln2 = O[j]
-    if (!done && ln2 ~ /^[ \t]*<\/mixPorts>[ \t]*$/) {
-      no++
-      O2[no] = ln2
-      for (k = 1; k <= n; k++) { no++; O2[no] = BP_LINES[k] }
-      done = 1
-      continue
-    }
-    # a route element is either on ONE line (<route ... sources="..." />) or
-    # wrapped, with sources="..." on the continuation line.
-    #   opens_route : this line opens a type="mix" route element
-    #   has_sources : this line carries the sources attribute
-    # append when (opens_route && has_sources)  -- single-line form
-    #         or (rwprev && has_sources)        -- wrapped form
-    # rwprev remembers "previous line opened a mix route with no sources yet".
-    opens_route = (ln2 ~ /^[ \t]*<route[ \t]/ && ln2 ~ /type="mix"/)
-    has_sources = (ln2 ~ /sources="/)
-    if (has_sources && (opens_route || rwprev) && ln2 !~ /hifi_output/) {
-      srcs = attr(ln2, "sources")
-      # playback routes only: a sink whose existing sources are all INPUT
-      # mixPorts (mic capture, voice_rx downlink, ...) must NOT get an output
-      # port appended -- it would be a policy-parse error, not a no-op.
-      # Output sinks all take their audio from the shared output mixPorts
-      # (low_latency_out / deep_buffer_out / ...), so the presence of one of
-      # those in the list is the safe, dialect-correct test.
-      if (srcs != "" && srcs ~ /(^|,)(low_latency_out|deep_buffer_out|direct_pcm_out|compress_offload_out|voip_playback|raw_out|mmap_no_irq_out)(,|$)/) {
-        ln2 = setattr(ln2, "sources", srcs ",hifi_output")
-      }
-    }
-    rwprev = (opens_route && !has_sources)
-    no++
-    O2[no] = ln2
-  }
-  if (!done) return                        # no </mixPorts> in the buffer: no-op
-  for (j = 1; j <= no; j++) O[j] = O2[j]
-  ON = no
-  if (!done) return                        # no </mixPorts>: leave everything
-
-  CHANGED = 1
-  NPORT++
-  PORTS = PORTS (PORTS == "" ? "" : ",") "mix:hifi_output=BITPERFECT"
-}
-
 # Work in *element* units, never in physical-line units: Qualcomm's AOSP-style
 # files wrap a single <profile> over four lines, so a line-oriented rewriter
 # would never even see the samplingRates attribute.  The original line breaks
@@ -747,38 +513,6 @@ END {
   }
   DIA  = (qti >= aosp) ? "qti" : "aosp"
   FKEY = (DIA == "qti") ? "pcmType" : "format"
-  # ------------------------------------------------------------------ BP gate
-  # TWO tests, BOTH required, and the order is deliberate: the dialect answer is
-  # a property of THIS FILE (always available, so it is the more specific
-  # verdict) whereas the SDK is device-wide context.  When both fail, the
-  # dialect message is the one the user gets.
-  #
-  # BIT_PERFECT is an AIDL-HAL feature (source.android.com preferred mixer
-  # attributes): a HIDL declaration is inert, so refuse instead of pretending.
-  # Refusing HERE, before the rewrite loop, means no output line has been
-  # produced -- the caller's output file stays empty and nothing is half-done.
-  if ((BP + 0) == 1 && DIA != "qti") {
-    printf("patch_policy: BIT_PERFECT requested but this file is the %s (HIDL) dialect -- Android only honours BIT_PERFECT on the AIDL audio HAL (Android 14+, SDK 34+)\n", DIA) > "/dev/stderr"
-    exit 2
-  }
-  # Version gate: AUDIO_OUTPUT_FLAG_BIT_PERFECT does not exist before Android 14
-  # (absent from the Android 13 policy schemas, present from aidl-lineage-21.0
-  # on), so on an older framework the port could only be an unknown-flag member.
-  # UNKNOWN (SDK unset / empty / non-numeric) is REFUSED too, on purpose: that
-  # is the fail-safe branch -- refusal is the zero-side-effect path (still not a
-  # single output line), while proceeding would hand a framework we cannot even
-  # date a flag it may not understand.  Only "SDK is a number >= 34" passes.
-  if ((BP + 0) == 1 && !(SDK ~ /^[0-9]+$/ && (SDK + 0) >= 34)) {
-    if (SDK ~ /^[0-9]+$/)
-      printf("patch_policy: BIT_PERFECT needs Android 14+ (SDK 34+); this device reports SDK %s -- the framework does not support the flag, refused\n", SDK) > "/dev/stderr"
-    else
-      printf("patch_policy: BIT_PERFECT needs Android 14+ (SDK 34+); cannot determine this device's version (no ro.build.version.sdk) -- refused rather than expose the framework to an unknown flag\n") > "/dev/stderr"
-    exit 2
-  }
-  if ((BP + 0) == 1) {
-    BP_RATES = make_rates(factory_mix(), DEV_POOL, CEIL)
-    if (BP_RATES == "") BP_RATES = "48000"
-  }
   # The rate-list separator is a per-FILE style, not a dialect rule: the AOSP
   # documentation writes spaces, yet the Redmi K20 Pro's HIDL file uses commas
   # and its compressed_offload profile mixes spaces into a comma file.  Infer
@@ -843,12 +577,7 @@ END {
     i++
   }
 
-  # ---- BIT_PERFECT channel (BP=1, qti dialect) -- append-only, AFTER the
-  #      stock-only pass, so every pre-existing port/route line is already
-  #      byte-identical by the time the extra port is added.
-  if ((BP + 0) == 1) emit_bp()
-
-  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " spk=" SPK " spkbits=" SPKBITS (((BP + 0) == 1) ? " bp=1" : "") " | generated, do not hand edit -->"
+  hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " spk=" SPK " spkbits=" SPKBITS " | generated, do not hand edit -->"
   hdr2 = "<!-- " MARKER " | ports=" PORTS " | repo: android audio src bypass -->"
 
   start = 1

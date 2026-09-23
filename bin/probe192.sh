@@ -233,7 +233,7 @@ esac
 #     bootfail.count / firstboot_done / config.conf / last.log)
 #   * the live property comes from `getprop` on PATH
 #   * HIFI_FAKE_BOOTLOG points the boot-verify history at any file instead of
-#     $STATE/last.log -- the same idea as HIFI_FAKE_FLINGER, so a user's pulled
+#     $STATE/last.log, so a user's pulled
 #     log can be replayed here without root.
 if want_core; then
 P0_BOOTLOG="${HIFI_FAKE_BOOTLOG:-$STATE/last.log}"
@@ -1100,7 +1100,7 @@ EOF
   if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
     # the usbfs evidence outranks the dumpsys active outputs
     printf '    ✓✓ 小尾巴的接口被 usbfs 接管（第 4b 段：%s 条）—— 播放器【自带 USB 驱动独占中】。\n' "${USBFS_N:-0}"
-    printf '      这就是「独占 USB 输出」生效的形态：音乐由 App 自己的驱动 bit-perfect 直连 DAC，\n'
+    printf '      这就是「独占 USB 输出」生效的形态：音乐由 App 自己的驱动免混音直连 DAC，\n'
     printf '      完全绕过 Android 音频栈 —— 本模块在此路径上【既不参与也不限制】。\n'
     printf '      此刻 dumpsys 里的活动 USB 输出是幽灵路由（内核声卡已消失），\n'
     printf '      它显示直通还是混音都【不算数】，真实路径以本条 usbfs 判定为准。\n'
@@ -1134,7 +1134,7 @@ EOF
   printf '\n  "感觉不到提升"的常见机制原因（不是模块坏了）：\n'
   printf '   · App【不开】独占 = 走 Android 音频栈，高解析请求经直通/HiFi 输出送出 ——\n'
   printf '     模块在链路上，可识别、可干预。【开】独占 = 自带 usbfs 驱动直连 DAC，\n'
-  printf '     模块在链路外（bit-perfect，与本模块无关）。\n'
+  printf '     模块在链路外（免混音直连，与本模块无关）。\n'
   printf '   · 没有独占开关的播放器永远走混音路径 —— 位深/采样率由它自己的请求决定，\n'
   printf '     模块能给的只有混音率对齐（免重采样）。\n'
   printf '   · USB 小尾巴的瓶颈往往不是采样率而是位深：原厂常用采样率已到 192k，\n'
@@ -1219,15 +1219,15 @@ else
 fi
 if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
   OUTPUT_LINE="播放器自带 USB 驱动独占中（usbfs ×${USBFS_N}）—— DAC 直连，规格以 DAC 屏为准"
-  VERDICT_LINE="ℹ️ 「独占 USB 输出」生效形态：音乐由 App 自带驱动直连 DAC（bit-perfect），本模块不参与也不限制"
+  VERDICT_LINE="ℹ️ 「独占 USB 输出」生效形态：音乐由 App 自带驱动直连 DAC（免混音），本模块不参与也不限制"
 elif [ -n "$OUT_FMT" ]; then
   OUTPUT_LINE="${OUT_CHAN:-USB 输出} → ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz 送往小尾巴"
   if [ -n "$ACT_RATE" ] && [ -n "$OUT_RATE" ] && [ "$ACT_RATE" -gt "$OUT_RATE" ] 2>/dev/null; then
     VERDICT_LINE="✅ 模块生效：App 的 ${ACT_RATE} Hz 高解析请求被接受，按 ${OUT_BITS:-?}/${OUT_RATE} Hz 输出；降档是 DAC 硬件上限（换更高上限的解码器可到 ${ACT_RATE}）"
   elif [ -n "$ACT_RATE" ] && [ -n "$OUT_RATE" ] && [ "$ACT_RATE" = "$OUT_RATE" ] 2>/dev/null; then
-    VERDICT_LINE="✅ 比特完美：App 请求率与实际输出一致（${OUT_BITS:-?} @ ${OUT_RATE} Hz），无降档也无上采样"
+    VERDICT_LINE="✅ 采样率对齐：App 请求率与实际输出一致（${OUT_BITS:-?} @ ${OUT_RATE} Hz），无降档也无上采样"
   elif [ -n "$ACT_RATE" ] && [ -n "$OUT_RATE" ] && [ "$ACT_RATE" -lt "$OUT_RATE" ] 2>/dev/null; then
-    VERDICT_LINE="✅ 输出通道在跑：${OUT_CHAN:-USB} ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz。请求 ${ACT_RATE} Hz < 输出 ${OUT_RATE} Hz = 无损上采样（不丢内容，但不是比特完美）。② 的请求率是【当前这首曲子】的采样率 —— 换歌就会变（HiRes 档位下 48k/96k/192k 都存在）。想让这一档比特完美：hifi set mixer ${ACT_RATE} 后 apply"
+    VERDICT_LINE="✅ 输出通道在跑：${OUT_CHAN:-USB} ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz。请求 ${ACT_RATE} Hz < 输出 ${OUT_RATE} Hz = 无损上采样（不丢内容）。② 的请求率是【当前这首曲子】的采样率 —— 换歌就会变（HiRes 档位下 48k/96k/192k 都存在）。想让这一档免重采样：hifi set mixer ${ACT_RATE} 后 apply"
   else
     VERDICT_LINE="✅ 输出通道在跑：${OUT_CHAN:-USB} ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz（明细见排查段）"
   fi
@@ -1297,7 +1297,7 @@ case "${D_VERDICT:-}" in
 esac
 if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
   printf 'USB 侧 : 小尾巴被 usbfs 接管 → 播放器自带 USB 驱动独占中\n'
-  printf '         音乐 bit-perfect 直连 DAC，本模块与它无关；dumpsys 的活动输出是幽灵路由，别看它\n'
+  printf '         音乐免混音直连 DAC，本模块与它无关；dumpsys 的活动输出是幽灵路由，别看它\n'
 elif [ "${USB_ACTIVE_N:-0}" -gt 0 ] 2>/dev/null; then
   if [ "${USB_DIRECT:-no}" = yes ]; then
     printf 'USB 侧 : 有活动输出走【直通 %s】→ 模块在链路上（5b 原文即证据）\n' "$(ports_disp "$DIR_PORTS" direct)"
@@ -1337,146 +1337,6 @@ elif [ "${PHONE_ACTIVE_N:-0}" -gt 0 ] || [ "${MEDIA_PLAYING_N:-0}" -gt 0 ] 2>/de
 else
   printf '归属   : 系统无音频播放 —— 播一首歌或插上小尾巴后再跑本校验\n'
 fi
-# ---- BIT_PERFECT channel verdict (read-only): Android 14+ AudioFlinger
-# spins a dedicated output thread for a player that requested bit-perfect
-# output through the preferred mixer attributes API.
-#
-# Reading that state out of `dumpsys media.audio_flinger` is subtle.  The
-# track table prints a column NAMED "BitPerfect":
-#
-#   Type  Id Active Client(pid/uid) ... Flushed BitPerfect InternalMute Latency
-#
-# but a real track row never repeats the column NAME -- it only carries the
-# VALUE, a bare true/false:
-#
-#                56  no  14563/1041 ... false 00000000 20070 0 I 0 0 false false new
-#
-# AudioFlinger re-prints that header once per thread AND once per "Local log:"
-# section, so grepping for "BitPerfect" counts headers, not tracks: on a phone
-# with zero bit-perfect playout it reported "9 条 BitPerfect 线程 ✅ 生效".
-# We therefore (1) drop the header rows, (2) require the row to carry a real
-# pid/uid pair, (3) take the boolean immediately before InternalMute -- the
-# row's tail is "PortMuted BitPerfect InternalMute", oldest layouts drop
-# PortMuted/InternalMute and leave BitPerfect as the only boolean.
-BP_DATA_ROW_AWK='
-  /BitPerfect[ \t]+InternalMute/ { next }              # the column-name header
-  /Client\(pid\/uid\)/           { next }              # any other header spelling
-  $0 !~ /[0-9][0-9]*[ \t]*\/[ \t]*[0-9]/ { next }      # needs a real pid/uid
-  {
-    n = split($0, f, /[ \t]+/)
-    nb = 0; prev = ""; last = ""
-    for (i = 1; i <= n; i++)
-      if (f[i] == "true" || f[i] == "false") { prev = last; last = f[i]; nb++ }
-    if (nb == 0) next
-    bpv = (nb == 1) ? last : prev
-    if (bpv == "true") c++
-  }
-  END { print c + 0 }
-'
-# HIFI_FAKE_FLINGER: offline self-test hook -- read the dump from this file
-# instead of spawning dumpsys (same convention as HIFI_FAKE_* above).
-BPF=/data/local/tmp/.hifi_probe_dump_flinger.txt
-BPF_TMP=yes
-if [ -n "${HIFI_FAKE_FLINGER:-}" ]; then
-  BPF="$HIFI_FAKE_FLINGER"
-  BPF_TMP=no
-else
-  dumpsys media.audio_flinger > "$BPF" 2>/dev/null
-fi
-BP_THR_N="$(awk "$BP_DATA_ROW_AWK" "$BPF" 2>/dev/null)"
-case "$BP_THR_N" in ''|*[!0-9]*) BP_THR_N=0 ;; esac
-[ "$BPF_TMP" = yes ] && rm -f "$BPF" 2>/dev/null
-
-# Which dialect is this phone?  Same rule as bin/hifi's dialect_of(): strip XML
-# comments, then the file is QTI/AIDL when pcmType= outnumbers
-# format="AUDIO_FORMAT_; HIDL/AOSP otherwise.  BIT_PERFECT is an AIDL-only
-# feature (Android officially supports the flag on the AIDL audio HAL) AND it
-# needs Android 14+ (SDK 34): the flag does not exist in the Android 13 policy
-# schemas.  Either condition failing makes this verdict not applicable -- it
-# must never print "生效" no matter what dumpsys happens to contain.  Read-only:
-# plain getprop, nothing is written.
-bp_dialect_of() {
-  awk '
-    { ln = $0
-      while (1) {
-        p = index(ln, "<!--")
-        if (p == 0) break
-        q = index(substr(ln, p), "-->")
-        if (q == 0) { ln = substr(ln, 1, p - 1); break }
-        ln = substr(ln, 1, p - 1) substr(ln, p + q + 2)
-      }
-      if (ln ~ /pcmType="/) qti++
-      else if (ln ~ /format="AUDIO_FORMAT_/) aosp++
-    }
-    END {
-      if (qti == 0 && aosp == 0) exit 3
-      print (qti >= aosp) ? "qti" : "aosp"
-    }' "$1" 2>/dev/null
-}
-
-BP_DIA=""
-if [ -r "$TGT" ]; then
-  while IFS='|' read -r bp_live bp_patched bp_stk; do
-    [ -n "$bp_live" ] || continue
-    case "$bp_live" in *.so) continue ;; esac
-    [ -r "$bp_stk" ] || continue
-    BP_DIA="$(bp_dialect_of "$bp_stk")"
-    [ -n "$BP_DIA" ] && break
-  done < "$TGT"
-fi
-if [ -z "$BP_DIA" ]; then
-  for bp_f in $POLICY_FILES; do
-    case "$bp_f" in *.so) continue ;; esac
-    bp_real="${POLICY_ROOT:-}${bp_f}"
-    [ -r "$bp_real" ] || continue
-    BP_DIA="$(bp_dialect_of "$bp_real")"
-    [ -n "$BP_DIA" ] && break
-  done
-fi
-
-# Did the policy side actually DECLARE the channel?  Our hifi_output mixPort is
-# the precondition: without it the framework can never hand a player a
-# bit-perfect output, so "生效" would be a lie even if a dump looked right.
-BP_DECL=no
-if [ -r "$TGT" ]; then
-  while IFS='|' read -r bp_live bp_patched bp_stk; do
-    [ -n "$bp_patched" ] || continue
-    grep -q 'name="hifi_output"' "$bp_patched" 2>/dev/null && { BP_DECL=yes; break; }
-  done < "$TGT"
-fi
-
-# Version half of the same gate: BIT_PERFECT was introduced in Android 14
-# (SDK 34) and an unreadable level is treated as "not satisfied" -- the module
-# itself refuses in exactly that case (bin/hifi do_apply, patch_policy.awk), so
-# the verdict here must agree with it instead of promising something the apply
-# would reject.
-BP_SDK="$(getprop ro.build.version.sdk 2>/dev/null)"
-case "$BP_SDK" in
-  ''|*[!0-9]*) BP_SDK_OK=no ;;
-  *) [ "$BP_SDK" -ge 34 ] 2>/dev/null && BP_SDK_OK=yes || BP_SDK_OK=no ;;
-esac
-
-if [ "${BP_DIA:-}" != qti ]; then
-  printf '\n⑤b BIT_PERFECT : ⚪ 不适用（HIDL 方言，Android 官方仅 AIDL 支持 BIT_PERFECT）'
-  if [ -n "${BP_DIA:-}" ]; then
-    printf ' —— 本机策略方言判定为 %s，无论 dumpsys 里出现什么都与此项无关\n' "$BP_DIA"
-  else
-    printf ' —— 本机没有可判定的策略文件（或策略方言未知）\n'
-  fi
-elif [ "$BP_SDK_OK" != yes ]; then
-  if [ -n "$BP_SDK" ]; then
-    printf '\n⑤b BIT_PERFECT : ⚪ 不适用（版本不满足：需要 Android 14+ / SDK 34+，本机 SDK %s）—— 与方言无关，请勿据此判断方言\n' "$BP_SDK"
-  else
-    printf '\n⑤b BIT_PERFECT : ⚪ 不适用（无法确认版本：取不到 ro.build.version.sdk；BIT_PERFECT 需要 Android 14+ / SDK 34+，模块在同样情况下也会拒绝应用）\n'
-  fi
-elif [ "$BP_DECL" != yes ]; then
-  printf '\n⑤b BIT_PERFECT : ⚪ 未声明 —— 策略里没有 hifi_output 通道（BIT_PERFECT=1 时为 AIDL 机型声明该通道，未声明则播放器无法请求）\n'
-elif [ "$BP_THR_N" -gt 0 ] 2>/dev/null; then
-  printf '\n⑤b BIT_PERFECT : ✅ 生效 —— AudioFlinger 正在运行 BitPerfect 输出线程（真实数据行 %s 条，dumpsys media.audio_flinger 为证）\n' "$BP_THR_N"
-else
-  printf '\n⑤b BIT_PERFECT : ⚪ 已声明未激活 —— 策略里已有 hifi_output 通道，但此刻没有 BitPerfect 真实数据行在跑（播放器未用 preferred mixer attributes API 请求；dumpsys 表格列标题不算）\n'
-fi
-
 # ---- ⑥ DSP 位宽强制 (SPK_DSP_BITS, v2.0.0 WP1) ------------------------------
 # One summary line (⑥) is not a check: it shows the raw property and the wanted
 # value, but never says whether they MATCH.  This block does, and it also
