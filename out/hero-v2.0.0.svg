@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 200" role="img" aria-label="HiFi SRC Bypass v2.0.0">
+  <rect width="1280" height="200" fill="#0f1218"/>
+  <text x="80" y="92"
+        font-family="-apple-system, Segoe UI, sans-serif"
+        font-size="56"
+        font-weight="700"
+        fill="#ffffff">HiFi SRC Bypass</text>
+  <text x="80" y="138"
+        font-family="-apple-system, Segoe UI, sans-serif"
+        font-size="22"
+        font-weight="400"
+        fill="#9ca3af">v2.0.0 · 全机型 USB 音频直通 · SRC 绕过 · Smart PA 功率层 · 扬声器档位 / 位深</text>
+</svg>
