@@ -313,7 +313,7 @@ MAX_RATE=$MAX_RATE
 #              DAC's own maximum, so every source is resampled up to it).
 #              A number pins the port to that rate: pick the rate YOUR library
 #              uses (192000 for 超清母带 / 臻品音质 masters) and that content
-#              plays bit-perfect; everything else is resampled UP, never down.
+#              plays without resampling; everything else is resampled UP, never down.
 HIFI_RATE=$HIFI_RATE
 # BIT_DEPTH  : ceiling for the USB / wired output bit depth (16 / 24 / 32).
 #              16 = do not extend at all, 32 = 16 + 24 + 32 (default)
@@ -1097,7 +1097,7 @@ HiFi SRC Bypass  (universal USB / wired SRC bypass)
   HAL layer      : $hal_txt
   factory backup : $([ -d "$STATE/stock" ] && ls -1 "$STATE/stock" 2>/dev/null | wc -l | tr -d ' ') archived file(s)
   mixer rate     : $MIXER_RATE Hz $([ "$MIXER_RATE" = 48000 ] && echo "(factory-typical)")$([ "$MIXER_RATE" = 44100 ] && echo "(44.1k library aligned)")$([ "$MIXER_RATE" = 192000 ] && echo "(high-rate mixer)")$([ "$MIXER_RATE" = 384000 ] && echo "(max-rate mixer)")
-  hifi port rate : $HIFI_RATE$([ "$HIFI_RATE" = auto ] && echo " (stock: follows the DAC maximum)")$([ "$HIFI_RATE" != auto ] && echo " Hz (pinned: $HIFI_RATE content is bit-perfect, the rest is resampled UP)")
+  hifi port rate : $HIFI_RATE$([ "$HIFI_RATE" = auto ] && echo " (stock: follows the DAC maximum)")$([ "$HIFI_RATE" != auto ] && echo " Hz (pinned: $HIFI_RATE content plays without resampling, the rest is resampled UP)")
   direct ceiling : $MAX_RATE Hz
   bit depth      : ${BIT_DEPTH}bit -> $(bitdepth_profiles "$BIT_DEPTH")
   speaker rate   : $SPK_RATE$([ "$SPK_RATE" = auto ] && echo " (factory)")$([ "$SPK_RATE" != auto ] && echo " Hz (pinned)")
@@ -2749,7 +2749,7 @@ HiFi SRC Bypass  (universal)   v${_uv}
   hifi set mixer 44100     global mixer rate (44100 / 48000 / 192000 / 384000)
   hifi set hifirate 192000 vendor HiFi port rate (auto = stock DAC maximum).
                            Pick the rate YOUR library uses: that content then
-                           plays bit-perfect, the rest is resampled UP, never down
+                           plays without resampling, the rest is resampled UP, never down
   hifi set max 384000      HiFi direct ceiling (48000 - 384000)
   hifi set bitdepth 24     USB / wired output bit-depth ceiling (16 / 24 / 32)
   hifi set spk 48000       speaker / earpiece port rate pinned to a single value,
