@@ -270,6 +270,37 @@ loaded_policy_file() {
   return 0
 }
 
+# Is this ROM a Qualcomm AIDL-dialect device?  OnePlus 13 (and other 8 Elite
+# class QTI ROMs) answer "AIDL HAL" as the config source and ship audio policy
+# XMLs that use the `pcmType` attribute; MTK / AOSP HIDL ROMs answer with a
+# real file path and use `format=`.  Two independent probes, first hit wins:
+#   1. the framework's own answer (dumpsys media.audio_policy, "Config source")
+#      mentioning AIDL -- the same evidence the report already prints;
+#   2. any candidate policy XML on this device using `pcmType=` (the QTI AIDL
+#      dialect) -- works even when audioserver is not running yet.
+# The offline test harness stubs `dumpsys`, so both branches stay exercisable.
+is_qti_aidl() {
+  case "$(config_source_desc 2>/dev/null)" in
+    *[Aa][Ii][Dd][Ll]*) return 0 ;;
+  esac
+  for f in $FIXED_CANDIDATES; do
+    [ -f "$PROOT$f" ] || continue
+    grep -q 'pcmType="' "$PROOT$f" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+QTI_AIDL_MIXER44K_WARN='!! MIXER_RATE=44100：Qualcomm AIDL 机型的 DSP 混音通路锁 48k 时钟粒度，44.1k 会产生周期性杂音（一加13 真机验证）。若扬声器/有线有"噗噗"声，请 mixer 48000 + hifirate 对齐音源。'
+
+# Emitted wherever MIXER_RATE=44100 is shown to a user: `hifi apply` output and
+# `hifi status`.  Warn-only -- the setting stays fully legal, and MTK / HIDL
+# dialect devices (Redmi Note 11T Pro verified) must never see this line.
+maybe_warn_qti_mixer44k() {
+  [ "$MIXER_RATE" = 44100 ] || return 0
+  is_qti_aidl || return 0
+  printf '%s\n' "$QTI_AIDL_MIXER44K_WARN"
+}
+
 load_conf() {
   [ -r "$CONF" ] && . "$CONF"
   case "$MIXER_RATE" in 44100|48000|192000|384000) ;; *) MIXER_RATE=48000 ;; esac
@@ -1137,6 +1168,11 @@ EOF
   else
     printf '    (not scanned yet -- run: hifi apply, or: hifi scan)\n'
   fi
+  # QTI AIDL dialects lock the DSP mixing path to a 48k clock granularity: a
+  # 44.1k mixer rate was verified on a OnePlus 13 to produce periodic pops on
+  # the speaker path.  Warn-only, and only on QTI AIDL devices (MTK / HIDL
+  # mixes 44.1k cleanly -- Redmi Note 11T Pro verified).
+  maybe_warn_qti_mixer44k
   printf '\n  USB HAL libraries (the hardware ceiling)\n'
   if [ "$HAL_PATCH" != 1 ]; then
     printf '    disabled -- enable with: hifi set hal 1\n'
@@ -1373,6 +1409,9 @@ do_apply() {
   # smart PA layer: config-driven runtime tinymix writes, AFTER the dsp
   # injection and BEFORE the report.  Empty / reset = nothing is touched.
   pa_apply_conf
+  # QTI AIDL + mixer 44100 = periodic pops on the speaker path (OnePlus 13
+  # verified): warn in the apply output the user actually reads.  Warn-only.
+  maybe_warn_qti_mixer44k
   do_report >/dev/null 2>&1
   return 0
 }

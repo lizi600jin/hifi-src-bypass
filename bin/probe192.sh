@@ -1198,6 +1198,37 @@ printf '      该 App 用自带 USB 驱动直连 DAC。此时【本模块与它�
 # ==================================================================== 结论
 sec 7 "结论（速览 + 排查明细）"
 
+# ---- ⑧ 混音率健康：QTI AIDL 方言探测（供速览 ⑧ 使用，纯读）-------------------
+# QTI AIDL 方言的 DSP 混音通路把硬件时钟粒度锁在 48k（5ms = 240 帧 @48k）。
+# 混音率声明成 44100 后 AudioFlinger 会以 192 帧周期切流，与 DSP 的 5ms 窗口
+# 每周期错位 0.65ms → 周期性滑码补偿 = 扬声器"噗噗"杂音（一加13 真机验证）。
+# MTK / HIDL 方言下内核 mixer 声明什么跑什么，44.1k 全链干净（xaga 验证）。
+# 方言判定与控制器 bin/hifi 的 is_qti_aidl() 同源，两个证据任一命中即算 AIDL：
+#   1. dumpsys media.audio_policy 的 Config source 提到 AIDL；
+#   2. 本机策略 XML 使用 pcmType=" 属性（QTI AIDL 方言）。
+AIDL_EVID=""
+AIDL_DUMP_FLINGER=""
+_cs8="$(dumpsys media.audio_policy 2>/dev/null | sed -n 's/.*Config source: *//p' | head -n1 | tr -d '\r')"
+case "$_cs8" in
+  *[Aa][Ii][Dd][Ll]*) AIDL_EVID="Config source: $_cs8" ;;
+esac
+if [ -z "$AIDL_EVID" ]; then
+  for _f8 in $POLICY_FILES; do
+    [ -f "$_f8" ] || continue
+    grep -q 'pcmType="' "$_f8" 2>/dev/null && { AIDL_EVID="策略 XML 使用 pcmType 方言: $_f8"; break; }
+  done
+  [ -z "$AIDL_EVID" ] && for _f8 in /odm/etc/audio/audio_module_config_primary.xml \
+                                  /vendor/etc/audio/audio_policy_configuration.xml \
+                                  /vendor/etc/audio/audio_module_config_primary.xml; do
+    [ -f "${POLICY_ROOT:-}$_f8" ] || continue
+    grep -q 'pcmType="' "${POLICY_ROOT:-}$_f8" 2>/dev/null && { AIDL_EVID="策略 XML 使用 pcmType 方言: $_f8"; break; }
+  done
+fi
+# HAL frame count 只在真机播放时可读；抓一次全文，速览 ⑧ 按需解析。
+# 读不到（无 root / 未播放）不算失败，只降级为"读不到"提示。
+[ -n "$AIDL_EVID" ] && AIDL_DUMP_FLINGER="$(dumpsys media.audio_flinger 2>/dev/null | tr -d '\r')"
+unset _cs8 _f8
+
 if [ -z "${MODDIR:-}" ]; then
   MODDIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
 fi
@@ -1265,6 +1296,43 @@ printf '%s\n' "⑤ 扬声器档位 : ${SPK_VERDICT:-未校验（扬声器端口�
 # so both the raw values and the 已注入 / 未注入 / 不符 judgement are visible.
 printf '%s\n' "⑥ DSP 位宽强制 : ${CONFIG_DSPBITS:-未设置}（期望 ${SPK_DSP_WANT}）—— ${SPK_DSP_VERDICT}"
 printf '%s\n' "⑦ P0 开机安全网 : bootmode=${P0_MODE} · bootfail=${P0_BF_N} · boot_degraded=$([ -e "$STATE/boot_degraded" ] && echo 有 || echo 无)"
+# ⑧ mixer-rate health: QTI AIDL dialects lock the DSP mixing path to a 48k
+# clock granularity (5ms = 240 frames @ 48k).  A mixer declared 44100 makes
+# AudioFlinger slice at 192 frames (4.35ms), which misaligns with the DSP
+# window by 0.65ms every period -- periodic pops on the speaker path.  Verified
+# on a OnePlus 13 (WSA884x); MTK / HIDL dialects mix 44.1k cleanly.  Warn-only.
+MR_OK=yes
+MR_DETAIL=""
+case "$CONFIG_MIX" in
+  44100)
+    if [ -n "$AIDL_EVID" ]; then
+      MR_HFC="$(printf '%s' "$AIDL_DUMP_FLINGER" | sed -n '/AudioOut_D/,/HAL frame count/p' | sed -n 's/.*HAL frame count: *\([0-9]*\).*/\1/p' | head -n1)"
+      if [ -n "$MR_HFC" ]; then
+        case "$MR_HFC" in
+          192|96|384|768)
+            MR_OK=no
+            MR_DETAIL="HAL frame count: $MR_HFC —— AudioFlinger 在按 44.1k 粒度切流，与 DSP 5ms 窗口每周期错位 → 周期性噗噗杂音" ;;
+          240|480|960)
+            MR_DETAIL="HAL frame count: $MR_HFC —— 仍按 48k 粒度切流，本机未出现时钟粒度错配" ;;
+          *)
+            MR_DETAIL="HAL frame count: $MR_HFC —— 非标准粒度（48k 粒度期望 240/480/960），以实际听感为准" ;;
+        esac
+      else
+        MR_DETAIL="HAL frame count 读不到（播放中重测，或 dumpsys 受限）"
+      fi
+    else
+      MR_DETAIL="非 AIDL 方言（HIDL / 文件路径），44.1k 混音无时钟粒度错配风险"
+    fi ;;
+  *) MR_DETAIL="mixer=${CONFIG_MIX:-48000}（默认/安全）" ;;
+esac
+if [ "$CONFIG_MIX" = 44100 ] && [ -n "$AIDL_EVID" ]; then
+  printf '%s\n' "⑧ 混音率健康 : ⚠️ MIXER_RATE=44100 + QTI AIDL 方言（$AIDL_EVID）—— DSP 混音通路锁 48k 时钟粒度，44.1k 会产生周期性杂音（一加13 真机验证）。修复：hifi set mixer 48000 && hifi apply"
+  [ -n "$MR_DETAIL" ] && printf '%s\n' "                $MR_DETAIL"
+elif [ "$CONFIG_MIX" = 44100 ]; then
+  printf '%s\n' "⑧ 混音率健康 : ✅ MIXER_RATE=44100（MTK / HIDL 方言，全链干净）"
+else
+  printf '%s\n' "⑧ 混音率健康 : ✅ $MR_DETAIL"
+fi
 printf '%s\n' "=============================================="
 printf '%s\n' ""
 printf '%s\n' "---- 排查明细（遇到问题把下面整段附在 issue 里）----"
