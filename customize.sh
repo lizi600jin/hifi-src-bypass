@@ -144,6 +144,16 @@ else
   chmod 0644 "$MODPATH/payload/"* "$MODPATH/webroot/"* 2>/dev/null
 fi
 
+# the bundled static mixer fallback (bin/tinymix_min, aarch64): exec bit is a
+# MUST (bin/hifi only picks it when -x), and it is only shipped for arm64
+# builds -- on anything else the absence is the safe "unknown" degradation.
+if [ -f "$MODPATH/bin/tinymix_min" ]; then
+  chmod 0755 "$MODPATH/bin/tinymix_min" 2>/dev/null
+  if command -v set_perm >/dev/null 2>&1; then
+    set_perm "$MODPATH/bin/tinymix_min" 0 0 0755
+  fi
+fi
+
 # adopt the old generation's settings, if any (runs our controller once)
 [ -r "$OLD_STATE/config.conf" ] && /system/bin/sh "$MODPATH/bin/hifi" migrate >/dev/null 2>&1
 

@@ -330,6 +330,12 @@ function mix_class(B, bn,   name, role, flags, i) {
   # this is the port USB audio actually plays through on Qualcomm/OnePlus-style
   # ROMs, and it is the one port neither MIXER nor the HAL rate table can reach.
   if (HIFI ~ /^[0-9]+$/ && flags == "" && name ~ /[Hh]ifi/) return "hifi"
+  # AOSP-mainline note: the "usb_device output" mixPort (shipped in its own
+  # usb_audio_policy_configuration.xml) has the same dynamic, profile-less
+  # shape, but mixPort-level usb-named ports are deliberately NOT pulled into
+  # the hifi tier -- a static profile there can defeat the HAL capability
+  # negotiation (MTK xaga on-device evaluation, 2026-09-25).  The USB sink is
+  # already covered by dev_class() on the devicePort side.
   return ""
 }
 

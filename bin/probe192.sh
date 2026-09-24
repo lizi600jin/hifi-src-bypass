@@ -1580,7 +1580,17 @@ unset _SP_MODEL _SP_EVID _dm _d _l
 # （tfa / wsa / aw_ / cs35 / smartpa，大小写不敏感）。这是纯读操作：
 # 用户把 [8] 段整段贴回，维护者就能从控件名直接推新的后端映射。
 printf '\n--- PA mixer 控件快照（回传用：贴回本段即可帮忙适配新机型）---\n'
+# tinymix userland: the PATH binary, or the module's static fallback
+# (bin/tinymix_min, same legacy 3-field dialect as the real tinymix -- see
+# bin/hifi).  `_PA_TMIX` is the command actually invoked; the banner names it
+# so a maintainer report says WHICH userland produced the dump.
+_PA_TMIX=""
 if command -v tinymix >/dev/null 2>&1; then
+  _PA_TMIX="tinymix"
+elif [ -x "$MODDIR/bin/tinymix_min" ]; then
+  _PA_TMIX="$MODDIR/bin/tinymix_min"
+fi
+if [ -n "$_PA_TMIX" ]; then
   _pa_snap="$STATE/pa.txt"
   if [ -r "$_pa_snap" ]; then
     printf '  -- hifi pa scan 快照 (%s) --\n' "$_pa_snap"
@@ -1588,11 +1598,11 @@ if command -v tinymix >/dev/null 2>&1; then
   else
     printf '  （无 %s 快照：先执行一次 hifi pa scan 可让本段更完整）\n' "$_pa_snap"
   fi
-  printf '  -- tinymix dump 中的 PA 相关控件 --\n'
-  tinymix 2>/dev/null | tr -d '\r' | grep -iE 'tfa|wsa|aw_|awinic|cs35|smartpa|speaker boost' | sed 's/^/  /'
-  _pa_hits_n="$(tinymix 2>/dev/null | tr -d '\r' | grep -icE 'tfa|wsa|aw_|awinic|cs35|smartpa|speaker boost')"
+  printf '  -- tinymix dump 中的 PA 相关控件（%s）--\n' "$(basename "$_PA_TMIX")"
+  "$_PA_TMIX" 2>/dev/null | tr -d '\r' | grep -iE 'tfa|wsa|aw_|awinic|cs35|smartpa|speaker boost' | sed 's/^/  /'
+  _pa_hits_n="$("$_PA_TMIX" 2>/dev/null | tr -d '\r' | grep -icE 'tfa|wsa|aw_|awinic|cs35|smartpa|speaker boost')"
   [ "$_pa_hits_n" -eq 0 ] && printf '  （dump 中无 PA 相关控件：本机 PA 可能不经 mixer 暴露）\n'
-  unset _pa_snap _pa_hits_n
+  unset _pa_snap _pa_hits_n _PA_TMIX
 else
   printf '  （tinymix 不可用：本段跳过）\n'
 fi

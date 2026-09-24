@@ -1675,7 +1675,26 @@ do_speaker() {
 # Hard refusals below are deliberate: 3175 (mute), 3176 (stop), 3177
 # (calibration), 3178 (algo), profile switching and /dev/tfa_reg writes are
 # never emitted, not even by accident.
+#
+# MIXER USERLAND RESOLUTION (three stages, first match wins):
+#   1. a real `tinymix` on PATH -- the v2.0.0 behaviour, byte-for-byte;
+#   2. the module's own static fallback, $MODDIR/bin/tinymix_min (source:
+#      payload/tinyalsa_min.c, pure kernel UAPI, musl-static ~33 KB).  Several
+#      ROMs -- MediaTek devices in particular -- ship no tinymix at all, which
+#      used to blind the whole PA layer; the fallback speaks the SAME legacy
+#      3-tab-field dialect ("num\tname\tvalue [enum tail]", ">" marks the
+#      current enum value), so every $TMIX call site below works unchanged;
+#   3. neither exists (bin stripped, foreign arch): stay "tinymix" -- every
+#      call fails quietly and the PA layer degrades to `unknown` exactly as
+#      before.  Desktop test hosts run the REAL tinymix_min binary: /dev/snd
+#      exists there, so tests must keep the module's bin/ clean of it.
 TMIX="tinymix"
+if ! command -v tinymix >/dev/null 2>&1; then
+  for _tm in "$MODDIR/bin/tinymix_min" "$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/tinymix_min"; do
+    if [ -x "$_tm" ]; then TMIX="$_tm"; break; fi
+  done
+  unset _tm
+fi
 TM_PROFILE=3174
 TM_EAR_GAIN=22
 TM_SPK_GAIN=23
