@@ -1,5 +1,6 @@
 # HiFi SRC Bypass · 全机型 USB 直通
 
+
 > 全机型通用的 Android 模块：**USB 小尾巴 / 有线耳机高解析直通（SRC 绕过）**。
 > **三层上限一起解** —— ① 音频策略 XML（框架允许分发什么）② USB HAL 库里的采样率常量表（DAC 实际能开到多少）
 > ③ **厂商 HiFi 通道的采样率**（接小尾巴后 USB 音频真正走的那条路，v1.8 新增）。
@@ -121,10 +122,11 @@
 | 机型 | SoC | 系统 | 方言 | 模块版本 | 结果 |
 |---|---|---|---|---|---|
 | Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v2.0.0 | ✅ 三层熔断 + 恢复路径全过（P0 真机验证）；`hifi doctor` 干净；版本史见下方 v1.9.0 数据点 |
+| Redmi Note 11T Pro (`xaga`) | MT6895 (天玑 8100) | Android 16 类原生 (BP4A.251205.006) | AOSP HIDL | v2.0.0 | ✅ **MTK + 类原生真机**：1 策略 + 1 HAL 挂载（libalsautils 表 96k→384k）；MIXER_RATE=192000 实测 AudioFlinger 混音线程 192000 Hz；spk/hifirate/ceiling/bits 全档位生效可回退；P0 安全网 prepare-only→激活正常（boot 111s）；doctor/report/adapt/restore 全过。无 tinymix，PA 降级 unknown（预期）。无小尾巴，USB 听感未测 |
 | OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10 策略 + 4/4 HAL 挂载；**PA WSA884x 后端 gain/vi 真机全链通过（gain 2 → 80 → reset 84）**；restore 零残留；doctor rc=0；版本史见下方 v1.9.0 数据点 |
 | vivo PD2408 (`V2408A`) | SM8750 (sun) | OriginOS, Android 16 (SDK 36) | QTI AIDL | v1.9.0 | ✅ 2 策略 + 4 HAL 挂载，boot 干净（2026-09-21 社区回传） |
 
-> **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 16 移植澎湃 OS HyperOS）；
+> **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 16 移植澎湃 OS HyperOS）、红米 Note 11T Pro（Redmi Note 11T Pro，Android 16 类原生，MTK 天玑 8100）；
 > 小尾巴为 CX31993（Conexant）+ MAX97220（Maxim）方案与 MOONDROP FreeDSP Mini；
 > 耳机为 MOONDROP Aria 2（真红限定版）与 MOONDROP 竹 II（CHU II）。
 > **v1.9.0 数据点**：K20 Pro 7 策略 + 2 HAL 挂载（mixer=44100 / hifi=192000 / bits=32 / SPK=44100 / SPKBITS=24，13 首实测 10/13 完美保 0）；
@@ -282,7 +284,8 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 | 荣耀（MagicOS，高通 / 联发科） | ⚠️ 可能有效（未实测） | MagicOS 基于 AOSP，策略路径与米系 / O 系接近；但荣耀保留了自家音效与调优通路，仍需以实测为准 |
 | 华为（麒麟 + 鸿蒙） | ❌ **厂商限制，预计无法生效** | 华为使用**自研音频 HAL**，通常不带 AOSP 那张采样率表，第二层没有目标；自 HarmonyOS NEXT 起已不再基于 AOSP，策略文件的格式与路径同本项目的前提完全不同，第一层也难以下手；加之其分区完整性校验更严格，systemless 挂载更容易被拒 |
 | 三星（One UI） | ⚠️ 可能有效（未实测） | 路径接近 AOSP，但三星自写音频 HAL 的比例较高，需实测确认 |
-| 谷歌 Tensor / 联发科（MTK） | ❌ **无法生效**（自研 HAL，无目标） | 调研结论（2026-09）：MTK 使用**自研 `MTKAudioHal`**，没有 `libalsautils*so`，两层都没有可下手的目标；USB 音频走硬性 offload，**上限约 96 kHz 且锁死**。瓶颈在 HAL/驱动层，本模块会**安全跳过**（属正常结果，不是故障） |
+| 谷歌 Tensor / 联发科（MTK）· 原厂 ROM | ❌ **无法生效**（自研 HAL，无目标） | 调研结论（2026-09）：MTK 使用**自研 `MTKAudioHal`**，没有 `libalsautils*so`，两层都没有可下手的目标；USB 音频走硬性 offload，**上限约 96 kHz 且锁死**。瓶颈在 HAL/驱动层，本模块会**安全跳过**（属正常结果，不是故障） |
+| 联发科（MTK）· 类原生 ROM | ✅ **已实测有效**（2026-09-24 · Redmi Note 11T Pro / 天玑 8100 / Android 16 类原生 / KernelSU 3.2.5） | 类原生把 MTK 的 USB 音频 HAL 换回了 **AOSP `audio.usb.default.so` → 链接 `libalsautils.so`**（readelf/maps 双证实），第二层有完整目标；策略 XML 是标准 aosp 方言（`format=` + 空格分隔），第一层正常改写；`hifi_playback` 空 mixPort 在位，第三层可用。真机全链（v2.0.0）：HAL 表 52 字节重排 96k→384k 挂载生效；`MIXER_RATE=192000` 后 **AudioFlinger 混音线程实测跑到 192000 Hz**（类原生「只走 24bit/48k」被打破）；扬声器档位 96k 钉死生效、回 auto 正确还原；`hifirate 192000` 给 hifi_playback 写入静态 16/24/32 @192k 三 profile、回 auto 恢复空声明；`preset` / `set` 全档位 + 非法值拒绝 + `doctor` / `report` / `adapt` / `restore`+re-apply 全过；P0 安全网首启 prepare-only → 次开机激活正常（boot 111s 无卡死）。已知边界：①该类机型 ROM **无 `tinymix` 二进制**，PA 层自动降级 unknown（安全不误写，开机零拖慢）；②SmartPA 是 Goodix 定制 TFA98xx（无增益 kctl），PA 只读属预期；③USB 小尾巴听感未测（手头无硬件），DAC 侧声明能力 384k 已在配置层确认 |
 | 索尼 Xperia（骁龙） | ➖ **多为原生直通，无需本模块** | 调研结论（2026-09）：骁龙平台 + 高通音频 HAL，`libalsautils.so` 在位（前提②成立）；但索尼**官方原生支持 USB Hi-Res**（Walkman 血统），USB DAC 直通本就免 SRC。老式 `audio_policy.conf` 用 `\|` 分隔且非 XML，**不在本模块处理范围**（现代版本已改用 XML）。瓶颈是其音效链 |
 | Android 12 及更早 | ⚠️ 可能有效（未实测） | 多为 `type` / `format` 方言，代码已按 AOSP / HIDL 处理并有夹具测试，但缺真机数据 |
 
@@ -317,7 +320,7 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 
 ## 4. 安装
 
-1. 下载本仓库 https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0
+1. 下载本仓库 [`dist/hifi-src-bypass-v2.0.0.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0)
 2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
 3. 重启
 4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
