@@ -8,6 +8,10 @@
 > 直通上限 96k / 192k / 384k 可选、位深 16 / 24 / 32 bit 可切、
 > 全局混音率与 HiFi 通道率均可对齐音源 —— **对得上的那条路就是比特完美**。
 > 原厂文件零改写（systemless 绑定挂载），一键还原、卸载自动清理。
+>
+> **📦 当前发布包**：`hifi-src-bypass-v2.0.0-mtk-classnative-speakerfix.zip` —— 包名即适配声明：
+> **MTK 类原生已实测适配**（Redmi Note 11T Pro / 天玑 8100 全链验证）+
+> **一加13 扬声器电流声已定位并加警示防护**（QTI AIDL 时钟粒度错配，见 §2.0c）。
 
 > ### 🆕 v2.0.0 新增「Smart PA 功率层」（实验 · 一加13 真机诊断驱动全面适配）
 >
@@ -84,6 +88,8 @@
 ## 📋 变更日志（Changelog）
 
 ### v2.0.0 · Smart PA 功率层 / P0 热修
+
+- **v2.0.0 适配版（`mtk-classnative-speakerfix`）**：一加13 扬声器「噗噗」电流声根因闭环 —— QTI AIDL 方言 DSP 混音通路锁 48k 时钟粒度，44100 混音率产生 192 帧周期切流错配（真机 A/B 排他验证，MTK/HIDL 无此问题）。固化三处警示（apply / status / doctor ⑧ 混音率健康，含 HAL frame count 实跑解析）：**只警示不阻断**，MTK/HIDL 机型 44100 照常零提示；发布包名更新为 `hifi-src-bypass-v2.0.0-mtk-classnative-speakerfix.zip` 声明适配状态。新增 controller 场景 13 断言，五阶段测试全绿
 
 - **新增 Smart PA 功率层（实验）**：`hifi pa gain 0..6 / boost 1|2 / vi on|off`，WebUI「Smart PA 功率」卡片（红色警示 + 7 档 pill + 二次确认）。仅运行时 tinymix 读写零文件改动；**硬编码拒绝**保护算法/校准/Mute 等危险控件（永不提供）；功率超限可造成不可逆硬件损伤，保持出厂 0 档最安全
 - **Smart PA 后端注册表（发布前最终修复 · 一加13 真机诊断驱动）**：运行时按控件名探测、不写死控件号——TFA9874（gain/boost/vi 全功能）与 Qualcomm WSA883x/884x（gain/vi，boost 由固件管理，多芯片立体声等值联动写入+逐个回读）可写，awinic / Cirrus / MTK 只读；只读后端绝不盲写，status 如实展示并提示回传 `hifi adapt`（新增 PA 快照段）协助补映射；未识别 PA 统一降级不误报
@@ -271,6 +277,20 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 会被路由自动送进 192000 的 HiFi 通道。
 反之，若把混音率拉到 384k 求高，只会把 44.1k 内容**上采样**（无损但无意义，还更吃 SoC 与 USB 总线）。
 
+### 2.0c 混音率 44100 的机型边界（一加13 真机定位 · v2.0.0 适配版修复）
+
+上面的 44100 推荐组合有一个**平台级例外**，已在一加13 真机上定位并固化进模块：
+
+- **现象**：一加13 上 `MIXER_RATE=44100` 时扬声器播放 48k 内容出现连续「噗噗」电流声
+- **根因（A/B 测试排他验证）**：Qualcomm AIDL 方言的 DSP 混音通路把硬件时钟粒度锁在 48k
+  （5ms = 240 帧 @48k）。XML 声明改成 44100 后 APM 信了，AudioFlinger 以 192 帧周期切流，
+  与 DSP 5ms 窗口每周期错位 0.65ms → 周期性滑码补偿 = 周期性杂音
+- **对照组**：Redmi Note 11T Pro（MTK / HIDL 方言）44100 全链干净 —— HIDL 方言下
+  内核 mixer 声明什么跑什么，无时钟粒度错配。**MTK / 类原生机型照旧推荐 44100 组合**
+- **模块行为（v2.0.0 适配版起）**：QTI AIDL 机型设 44100 时，`hifi apply` 输出、`hifi status`、
+  深度校验速览 **⑧ 混音率健康** 三处出现明确警示（**只警示不阻断**，44100 仍可设置）；
+  doctor ⑧ 会解析 AudioFlinger 实跑 HAL frame count（192=错配⚠️ / 240=48k 粒度✅）佐证。
+  修复方式：`hifi set mixer 48000 && hifi apply`，再用 hifirate 对齐音源
 
 **未验证**：MTK 与谷歌 Tensor（USB 硬件 offload 通常只到 96k，且多半没有 `libalsautils*so`，本模块会安全跳过）、三星 One UI、Android 12 及更早的老 ROM。这些都有夹具测试覆盖，但没有真机数据。
 
@@ -321,7 +341,8 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 
 ## 4. 安装
 
-1. 下载本仓库 [`dist/hifi-src-bypass-v2.0.0.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0)
+1. 下载本仓库发布包 [`hifi-src-bypass-v2.0.0-mtk-classnative-speakerfix.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0)
+   （包名声明适配范围：MTK 类原生已适配 + 一加13 扬声器电流声已修复；版本号仍为 2.0.0）
 2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
 3. 重启
 4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
@@ -421,7 +442,8 @@ dist/                       打好的可刷入 zip
 ## 8. 已知边界
 
 - **不适用**：Android 7 及更早（`audio_policy.conf` 时代，无 XML 策略）→ 安装后保持惰性
-- **未验证**：MTK / 谷歌 Tensor（`libalsautils*so` 常缺失，会走「安全跳过」路径）、三星 One UI、Android 12 及更早
+- **未验证**：谷歌 Tensor（`libalsautils*so` 常缺失，会走「安全跳过」路径；MTK 原厂 ROM 同理，**MTK 类原生已实测适配**，见 §2.1）、三星 One UI、Android 12 及更早
+- **混音率 44100 机型边界**：QTI AIDL 机型（一加13 等）DSP 混音通路锁 48k 时钟粒度，44100 会产生周期性扬声器杂音 —— 模块会三处警示并给出修复建议（mixer 48000）；MTK/HIDL 机型无此问题（见 §2.0c）
 - **改不了的情况**：ROM 用的是厂商自写 USB HAL（表不存在）且策略 XML 又是无 profile 的空壳 ——
   此时两层都无从下手，模块会明确报告「本机没有可补丁的目标」而不是假装成功
 - **上限高于 DAC 真实能力会导致无声**：请用 `hifi preset auto` 或 WebUI 的小尾巴卡片对齐档位
