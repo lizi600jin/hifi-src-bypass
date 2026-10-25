@@ -223,9 +223,9 @@
 
 | 机型 | SoC | 系统 | 方言 | 模块版本 | 结果 |
 |---|---|---|---|---|---|
-| Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v2.0.0 | ✅ 三层熔断 + 恢复路径全过（P0 真机验证）；`hifi doctor` 干净；版本史见下方 v1.9.0 数据点 |
+| Redmi K20 Pro (`raphael`) | SM8150 | Android 17 | QTI HIDL | v2.0.0 | ✅ 三层熔断 + 恢复路径全过（P0 真机验证）；`hifi doctor` 干净；版本史见下方 v1.9.0 数据点 |
 | Redmi Note 11T Pro (`xaga`) | MT6895 (天玑 8100) | Android 16 类原生 (BP4A.251205.006) | AOSP HIDL | v2.0.2 | ✅ **MTK + 类原生真机**：1 策略 + 1 HAL 挂载（libalsautils 表 96k→384k）；MIXER_RATE=192000 实测 AudioFlinger 混音线程 192000 Hz；spk/hifirate/ceiling/bits 全档位生效可回退；P0 安全网 prepare-only→激活正常（boot 111s）；doctor/report/adapt/restore 全过。无 tinymix，PA 降级 unknown（预期）。无小尾巴，USB 听感未测 |
-| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10 策略 + 4/4 HAL 挂载；**PA WSA884x 后端 gain/vi 真机全链通过（gain 2 → 80 → reset 84）**；restore 零残留；doctor rc=0；版本史见下方 v1.9.0 数据点 |
+| OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 17 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10 策略 + 4/4 HAL 挂载；**PA WSA884x 后端 gain/vi 真机全链通过（gain 2 → 80 → reset 84）**；restore 零残留；doctor rc=0；版本史见下方 v1.9.0 数据点 |
 | vivo PD2408 (`V2408A`) | SM8750 (sun) | OriginOS, Android 16 (SDK 36) | QTI AIDL | v1.9.0 | ✅ 2 策略 + 4 HAL 挂载，boot 干净（2026-09-21 社区回传） |
 
 > **v2.0.2 新增验证**：Redmi Note 11T Pro 的 **3.5mm 耳机口**链路 —— `Wired Headset` / `Wired Headphones`
@@ -233,7 +233,7 @@
 > 自检在未插小尾巴、直插 3.5mm 耳机播放时输出 `3.5mm耳机 (primary output) → 24bit @ 48000 Hz`；
 > 扬声器播放时输出 `扬声器 (deep_buffer) → 24bit @ 48000 Hz`。
 >
-> **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 16 移植澎湃 OS HyperOS）、红米 Note 11T Pro（Redmi Note 11T Pro，Android 16 类原生，MTK 天玑 8100）；
+> **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 17 移植澎湃 OS HyperOS）、红米 Note 11T Pro（Redmi Note 11T Pro，Android 16 类原生，MTK 天玑 8100）；
 > 小尾巴为 CX31993（Conexant）+ MAX97220（Maxim）方案与 MOONDROP FreeDSP Mini；
 > 耳机为 MOONDROP Aria 2（真红限定版）与 MOONDROP 竹 II（CHU II）。
 > **v1.9.0 数据点**：K20 Pro 7 策略 + 2 HAL 挂载（mixer=44100 / hifi=192000 / bits=32 / SPK=44100 / SPKBITS=24，13 首实测 10/13 完美保 0）；
