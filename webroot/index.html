@@ -3,16 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>HiFi SRC Bypass · 全机型 USB 直通</title>
+<title>HiFi SRC Bypass · 全机型 USB 直通与硬件调谐台</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="wrap">
 
+  <!-- ==================== HERO CONSOLE HEADER ==================== -->
   <header class="hero">
     <div class="hero-main">
+      <div class="brand-eyebrow">
+        <span class="led-dot" id="heroLed" aria-hidden="true"></span>
+        <span class="mono-tag">AUDIO POLICY &amp; SMART PA ENGINE</span>
+      </div>
       <h1>HiFi SRC Bypass</h1>
-      <p class="sub">全机型 · USB 小尾巴 / 有线耳机 高解析直通 · SRC 绕过</p>
+      <p class="sub">全机型 · USB 小尾巴 / 有线耳机 高解析直通 · 零重采样调谐台</p>
     </div>
     <div class="hero-badges">
       <span id="badgeApplied" class="badge">读取中…</span>
@@ -20,41 +25,87 @@
     </div>
   </header>
 
-  <div id="banner" class="banner hidden"></div>
+  <!-- Global Alert / Two-Step Confirm Banner -->
+  <div id="banner" class="banner hidden" role="status" aria-live="polite"></div>
 
-  <section class="card">
-    <h2>当前状态</h2>
-    <div class="grid">
-      <div class="stat"><span class="k">补丁挂载</span><span class="v" id="stApplied">—</span></div>
-      <div class="stat"><span class="k">全局混音采样率</span><span class="v" id="stMixer">—</span></div>
-      <div class="stat"><span class="k">HiFi 直通上限</span><span class="v" id="stMax">—</span></div>
-      <div class="stat"><span class="k">HiFi 通道率</span><span class="v" id="stHifi">—</span></div>
-      <div class="stat"><span class="k">直通位深上限</span><span class="v" id="stBits">—</span></div>
-      <div class="stat"><span class="k">扬声器采样率</span><span class="v" id="stSpk">—</span></div>
-      <div class="stat"><span class="k">扬声器位深</span><span class="v" id="stSpkBits">—</span></div>
-      <div class="stat"><span class="k">DSP 位宽强制</span><span class="v" id="stSpkDsp">—</span></div>
-      <div class="stat"><span class="k">音频服务</span><span class="v" id="stAudio">—</span></div>
-      <div class="stat"><span class="k">机型 / SDK</span><span class="v" id="stDevice">—</span></div>
-      <div class="stat"><span class="k">生效文件</span><span class="v" id="stFiles">—</span></div>
-      <div class="stat"><span class="k">HAL 库上限</span><span class="v" id="stHal">—</span></div>
-      <div class="stat wide"><span class="k">生效文件清单</span><span class="v mono" id="stTarget">—</span></div>
+  <!-- ==================== HERO TELEMETRY BOARD ==================== -->
+  <section class="card telemetry-card">
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l3-7 4 14 3-7h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h2>核心链路看板</h2>
+      </div>
+      <span class="sec-tag mono">LIVE TELEMETRY</span>
     </div>
+
+    <!-- Primary Hero 4-Grid (Key Acoustic Metrics) -->
+    <div class="grid hero-grid">
+      <div class="stat focal">
+        <span class="k">补丁挂载状态</span>
+        <span class="v" id="stApplied">—</span>
+      </div>
+      <div class="stat focal">
+        <span class="k">全局混音采样率</span>
+        <span class="v tabular" id="stMixer">—</span>
+      </div>
+      <div class="stat focal">
+        <span class="k">HiFi 直通上限</span>
+        <span class="v tabular" id="stMax">—</span>
+      </div>
+      <div class="stat focal">
+        <span class="k">直通位深上限</span>
+        <span class="v tabular" id="stBits">—</span>
+      </div>
+    </div>
+
+    <!-- Secondary Detailed System Telemetry -->
+    <details class="sub-telemetry" open>
+      <summary class="sub-telemetry-toggle">
+        <span>完整声学路由与系统参数</span>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </summary>
+      <div class="grid sub-grid">
+        <div class="stat"><span class="k">HiFi 通道率</span><span class="v tabular" id="stHifi">—</span></div>
+        <div class="stat"><span class="k">扬声器采样率</span><span class="v tabular" id="stSpk">—</span></div>
+        <div class="stat"><span class="k">扬声器位深</span><span class="v tabular" id="stSpkBits">—</span></div>
+        <div class="stat"><span class="k">DSP 位宽强制</span><span class="v tabular" id="stSpkDsp">—</span></div>
+        <div class="stat"><span class="k">音频服务</span><span class="v mono" id="stAudio">—</span></div>
+        <div class="stat"><span class="k">机型 / SDK</span><span class="v mono" id="stDevice">—</span></div>
+        <div class="stat"><span class="k">生效文件</span><span class="v tabular" id="stFiles">—</span></div>
+        <div class="stat"><span class="k">HAL 库上限</span><span class="v tabular" id="stHal">—</span></div>
+        <div class="stat wide"><span class="k">生效文件清单</span><span class="v mono" id="stTarget">—</span></div>
+      </div>
+    </details>
   </section>
 
-  <section class="card">
+  <!-- ==================== USB DAC MONITOR ==================== -->
+  <section class="card dac-card">
     <div class="card-head">
-      <h2>USB 解码器（小尾巴）</h2>
-      <button id="btnDac" class="btn small ghost">重新检测</button>
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="4" width="10" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10 16v4m4-4v4M9 4V2m6 2V2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <h2>USB 解码器（小尾巴）</h2>
+      </div>
+      <button id="btnDac" class="btn small ghost">
+        <svg class="ic-btn" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        重新检测
+      </button>
     </div>
     <div id="dacBox" class="dac">
       <p class="muted">未检测到 USB 音频设备。插上小尾巴后点击「重新检测」。</p>
     </div>
   </section>
 
+  <!-- ==================== ONE-TAP PRESETS ==================== -->
   <section class="card">
-    <h2>一键预设</h2>
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h2>一键预设</h2>
+      </div>
+      <span class="sec-tag mono">QUICK SCENE</span>
+    </div>
     <div class="pills preset" id="pillPreset">
-      <button class="pill" data-p="auto">自动识别<em>读取小尾巴上限并自动配置（推荐）</em></button>
+      <button class="pill preset-auto" data-p="auto">自动识别<em>读取小尾巴上限并自动配置（推荐）</em></button>
       <button class="pill" data-p="96k">96 kHz 高清臻音<em>高清臻音</em></button>
       <button class="pill" data-p="384k">384 kHz 满血<em>CX31993 + MAX97220</em></button>
       <button class="pill" data-p="192k">192 kHz 超清母带<em>Master · 母带级 24bit/192k</em></button>
@@ -66,11 +117,21 @@
     <strong>「自动识别」</strong>会读小尾巴对内上报的最高采样率与位深，自动挑一个不超过它、且本模块支持的档位 —— 换耳机/换小尾巴后点一下就行。</p>
   </section>
 
+  <!-- ==================== ZONE 1: CORE DIRECT SETTINGS ==================== -->
   <section class="card">
-    <h2>直通设置</h2>
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="4" y1="10" x2="4" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="21" x2="12" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="8" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="20" y1="21" x2="20" y2="16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="20" y1="12" x2="20" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="10" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="20" cy="14" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+        <h2>核心直通设置（USB / 有线）</h2>
+      </div>
+      <span class="sec-tag mono">SRC BYPASS</span>
+    </div>
 
     <div class="field">
-      <label>全局混音采样率</label>
+      <div class="field-hd">
+        <label>全局混音采样率</label>
+        <span class="field-badge">AudioFlinger Mixer</span>
+      </div>
       <p class="hint">系统<strong>混音器工作频率</strong>：与音源一致时 AudioFlinger 不再重采样，让<strong>所有 App</strong>免于 SRC。<br>
       <strong>怎么选</strong>：按曲库多数采样率 —— 44.1k 选 <strong>44.1 kHz（推荐）</strong>，48k 为主保持 48 kHz（原厂）；192 / 384 kHz 属升采样试听（<strong>实验</strong>）。</p>
       <div class="pills" id="pillMixer">
@@ -79,105 +140,160 @@
         <button class="pill" data-v="192000">192 kHz<em>高倍升采样</em></button>
         <button class="pill" data-v="384000">384 kHz<em>拉满 · 高端机型</em></button>
       </div>
-      <p class="hint">换档<strong>把整个混音端口重写成你选的频率</strong>（框架取列表最大值，只加一项没用）；免 SRC 的前提是<strong>混音率 = 音源率</strong>。<br>
-      改完点「应用并生效」立即生效。
-      <br>
-      <strong>超越原厂</strong>：原厂混音器只有 <strong>48k 一个工作率</strong>，44.1k 曲库每一帧都要过 SRC ——
-      把混音率钉到 <strong>44.1 kHz</strong>，全部 App 的音乐回放链路<strong>零重采样</strong>，这是本模块最大的一处超越。
-      <br>
-      <strong>操作</strong>：以听音乐为主选 44.1k（点「应用并生效」即时切换，<strong>无需重启</strong>）；
-      常看视频的日子切回 48k（视频等 48k 内容走 147:160 非整数重采样会变差）。
-      切换后可在「深度校验 [3]」看到运行时上限已变成你钉的值。</p>
+      <details class="tech-note">
+        <summary>展开超越原厂原理与场景操作建议</summary>
+        <p class="hint">换档<strong>把整个混音端口重写成你选的频率</strong>（框架取列表最大值，只加一项没用）；免 SRC 的前提是<strong>混音率 = 音源率</strong>。改完点「应用并生效」立即生效。<br>
+        <strong>超越原厂</strong>：原厂混音器只有 <strong>48k 一个工作率</strong>，44.1k 曲库每一帧都要过 SRC —— 把混音率钉到 <strong>44.1 kHz</strong>，全部 App 的音乐回放链路<strong>零重采样</strong>，这是本模块最大的一处超越。<br>
+        <strong>操作</strong>：以听音乐为主选 44.1k（点「应用并生效」即时切换，<strong>无需重启</strong>）；常看视频的日子切回 48k（视频等 48k 内容走 147:160 非整数重采样会变差）。切换后可在「深度校验 [3]」看到运行时上限已变成你钉的值。</p>
+      </details>
     </div>
 
     <div class="field">
-      <label>HiFi 直通上限</label>
+      <div class="field-hd">
+        <label>HiFi 直通上限</label>
+        <span class="field-badge">DIRECT Ceiling</span>
+      </div>
       <p class="hint">USB / 有线 <strong>DIRECT 直通通道</strong>允许的最高采样率，够高才能让独占输出的音源不被压到低率。<br>
       <strong>怎么选</strong>：按小尾巴<strong>上报的真实上限</strong>选（上面「USB 解码器」一格可见）—— 384 kHz 是 CX31993 一类芯片的上限；只到 96 kHz 的选 <strong>96 kHz</strong>，别盲目拉满。</p>
       <div class="pills rates" id="pillMax"></div>
     </div>
 
     <div class="field">
-      <label>HiFi 通道率（USB 实际通路）</label>
+      <div class="field-hd">
+        <label>HiFi 通道率（USB 实际通路）</label>
+        <span class="field-badge">hifi_playback</span>
+      </div>
       <p class="hint">插上小尾巴后 USB 音频<strong>不走混音器</strong>，走厂商 HiFi 端口（如 <code>hifi_playback</code>）。<br>
-      <strong>怎么选</strong>：钉在<strong>你正在听的音源采样率</strong>上，该率即<strong>零重采样直出</strong> —— 网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz（推荐）</strong>，96k 母带选 96 kHz。<br>
-      其余率只会上采样、不丢内容，<strong>永远不要往下选</strong>（有损下采样）；<code>auto</code>＝原厂行为。
-      <br>
-      <strong>超越原厂</strong>：原厂 HiFi 端口<strong>永远跟着 DAC 最大能力走</strong>，任何音源都被拉到最高率重采样 ——
-      把它钉到<strong>你曲库的采样率</strong>，该率内容<strong>免重采样直出</strong>（192k 母带 / 臻品音质即真无损全链路）。
-      <br>
-      <strong>操作</strong>：听 192k 母带选 <strong>192 kHz</strong>，96k 母带选 96 kHz；曲库以 44.1k 为主则钉
-      <strong>44.1 kHz</strong>（母带内容走 4 倍整数升采样，无损折算）。播放时在「深度校验 5b」看到
-      <code>hifi_playback + 192000 + PCM_32_BIT</code> 即为达成；拿不准选 <code>auto</code>（＝原厂，不会更差）。</p>
+      <strong>怎么选</strong>：钉在<strong>你正在听的音源采样率</strong>上，该率即<strong>零重采样直出</strong> —— 网易云「超清母带」/ QQ 音乐「臻品音质」多为 <strong>192 kHz（推荐）</strong>，96k 母带选 96 kHz。</p>
       <div class="pills" id="pillHifi"></div>
+      <details class="tech-note">
+        <summary>展开 HiFi 通道直出原理与校验方法</summary>
+        <p class="hint">其余率只会上采样、不丢内容，<strong>永远不要往下选</strong>（有损下采样）；<code>auto</code>＝原厂行为。<br>
+        <strong>超越原厂</strong>：原厂 HiFi 端口<strong>永远跟着 DAC 最大能力走</strong>，任何音源都被拉到最高率重采样 —— 把它钉到<strong>你曲库的采样率</strong>，该率内容<strong>免重采样直出</strong>（192k 母带 / 臻品音质即真无损全链路）。<br>
+        <strong>操作</strong>：听 192k 母带选 <strong>192 kHz</strong>，96k 母带选 96 kHz；曲库以 44.1k 为主则钉 <strong>44.1 kHz</strong>（母带内容走 4 倍整数升采样，无损折算）。播放时在「深度校验 5b」看到 <code>hifi_playback + 192000 + PCM_32_BIT</code> 即为达成；拿不准选 <code>auto</code>（＝原厂，不会更差）。</p>
+      </details>
     </div>
 
     <div class="field">
-      <label>直通位深上限</label>
+      <div class="field-hd">
+        <label>直通位深上限</label>
+        <span class="field-badge">Bit Depth</span>
+      </div>
       <p class="hint">USB / 有线输出端口的<strong>位深上限</strong>：原厂常只给 16bit，补齐到 24 / 32bit 后 Hi-Res 音源才不被截位（16bit 始终保留）。<br>
-      <strong>怎么选</strong>：解码器能收 24bit 就选 <strong>24-bit（推荐）</strong>，确定支持 32bit 才选 32-bit；<strong>16-bit</strong>＝最保守基线（<strong>实验</strong>）。<br>
-      选高于解码器能力可能<strong>无声</strong>。</p>
+      <strong>怎么选</strong>：解码器能收 24bit 就选 <strong>24-bit（推荐）</strong>，确定支持 32bit 才选 32-bit；<strong>16-bit</strong>＝最保守基线（<strong>实验</strong>）。选高于解码器能力可能<strong>无声</strong>。</p>
       <div class="pills" id="pillBits"></div>
     </div>
+  </section>
 
-    <div class="field">
-      <label>扬声器采样率档位</label>
-      <p class="hint">手机<strong>扬声器 / 听筒</strong>端口的采样率：钉死为曲库采样率后，扬声器回放<strong>也免于 SRC</strong>（原厂常锁 48 kHz，播 44.1k 会先被重采样）。<br>
-      <strong>怎么选</strong>：44.1k 曲库选 <strong>44.1 kHz（推荐，配「扬声器一键优化」）</strong>，其他情况保留 <strong>auto</strong>＝原厂；不要往下选（有损下采样）。
-      <br>
-      <strong>超越原厂</strong>：原厂扬声器端口常<strong>锁死 48 kHz</strong>，44.1k 音乐外放必被重采样 ——
-      钉到 <strong>44.1 kHz</strong> 后外放同样零重采样，与混音率组成全链路免 SRC。
-      <br>
-      <strong>操作</strong>：外放听音乐钉 44.1k（或直接用下面「扬声器一键优化」一步到位），
-      在「深度校验 ⑤」看到「扬声器档位生效 ✅」即达成；外放看视频为主则保留 <code>auto</code>（48k 内容非整数降采样会变差）。
-      蓝牙音箱 / 车机走同一端口，SBC / AAC 设备听感变差先回 <code>auto</code> 验证。</p>
-      <div class="pills" id="pillSpk"></div>
+  <!-- ==================== ZONE 2: SPEAKER & SMART PA CONSOLE ==================== -->
+  <section class="card spk-card">
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="14" r="4" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12" y1="6" x2="12.01" y2="6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <h2>扬声器与 Smart PA 硬件功放专区</h2>
+      </div>
+      <span class="sec-tag mono">SPEAKER &amp; AMP</span>
     </div>
 
-    <div class="field">
-      <label>扬声器位深上限</label>
-      <p class="hint">扬声器 / 听筒端口的<strong>位深上限</strong>：内置 DAC 多有 24bit 能力，原厂策略却常只声明 16bit，补到 <strong>24-bit（推荐）</strong> 可减少播放截位损耗。<br>
-      确定硬件支持 32bit 才选 32-bit；<strong>16-bit</strong>＝保持原厂。选高于硬件能力可能扬声器<strong>无声</strong>。</p>
-      <div class="pills" id="pillSpkBits"></div>
-    </div>
-
-    <div class="field">
-      <label>DSP 位宽强制</label>
-      <p class="hint">把高通 QTI 的 ADSP <strong>ASM 流强制到指定位宽</strong>（注入属性 <code>persist.vendor.audio_hal.dsp_bit_width_enforce_mode</code>），让扬声器回放的混音链路以更高位宽工作、减少中间截位。<br>
-      <strong>怎么选</strong>：<strong>24-bit（推荐）</strong>，硬件与 ROM 支持时可用 32-bit；<strong>16（关）</strong>＝原厂行为，出问题第一个回退到它。<br>
-      点「应用并生效」时注入、重启服务后生效，「一键还原」自动清除（纯属性层）。
-      <br>
-      <strong>超越原厂</strong>：原厂从不注入该属性，ADSP 混音链路按默认位宽<strong>中间截位</strong> ——
-      强制到 <strong>24-bit</strong> 后扬声器链路以更高位宽工作，这是位深层面唯一的扬声器超越点。
-      <br>
-      <strong>操作</strong>：先在系统设置<strong>关闭杜比 / 空间音频等厂商音效</strong>（排除 DSP 叠加干扰），再选
-      24-bit 点「应用并生效」，重启音频服务后在「深度校验 ⑥」看到「已注入」且 live 属性 = 24 即达成。
-      听感对比基准是 <strong>16（关）</strong>：若叠加厂商音效反而变差，顺序回退「关音效 → DSP 回 16 → 位深回 16」。</p>
-      <div class="pills" id="pillSpkDsp"></div>
-    </div>
-
-    <div class="field pa-zone">
-      <label>Smart PA 功率（实验 · 影响扬声器硬件功率）</label>
-      <p class="hint"><strong class="pa-alert">⚠️ 红色警示：本档位直接改变扬声器驱动功率。</strong>功率超过振膜承受能力会造成<strong>不可逆的硬件损伤</strong>（破膜/烧圈/永久失真）；保护算法仍在线，但频繁触顶削峰会积累损坏。<br>
-      <strong>怎么用</strong>：保持<strong>出厂 0</strong>（＝原厂）最安全；确要提升，<strong>从 +1dB 起步、每档听够 24 小时无异常再加</strong>，最多 +6dB；听到<strong>破音/闷响/音量忽大忽小</strong>立即回出厂 0。<br>
-      <strong>防负优化</strong>：+6dB 不是「更响更好」——响度提升 ≈ +6dB，但失真同步放大，多数机型 +3dB 以上听感收益转负；boost 保持<strong>满档 2</strong>（出厂基准），降档只省电不保真。</p>
-      <div class="pills" id="pillPa"></div>
-      <p class="hint" id="paState">—</p>
-    </div>
-
-    <div class="field">
-      <label>扬声器一键优化</label>
-      <p class="hint">一键把扬声器 / 听筒设成「<strong>44.1 kHz + 24bit</strong>」免 SRC 组合：回放不再被系统重采样、位深同时补齐（<strong>推荐</strong>）。<br>
-      「还原 auto (16bit)」把档位交回系统；更高档（192 kHz / 32bit）属 <strong>实验</strong>，终端跑 <code>hifi speaker hires</code>。
-      <br>
-      <strong>超越原厂</strong>：一键完成「44.1 kHz + 24bit」双超越组合（免重采样 + 补位深），是扬声器档位
-      <strong>推荐的最终形态</strong>；常外放看视频请改用「还原 auto」。</p>
+    <!-- Speaker Quick Optimization Bar -->
+    <div class="field spk-quick-field">
+      <div class="field-hd">
+        <label>扬声器一键优化</label>
+        <span class="field-badge ok-tint">44.1k + 24bit 免 SRC</span>
+      </div>
+      <p class="hint">一键把扬声器 / 听筒设成「<strong>44.1 kHz + 24bit</strong>」免 SRC 组合：回放不再被系统重采样、位深同时补齐（<strong>推荐</strong>）。常外放看视频请改用「还原 auto」。</p>
       <div class="pills">
+        <button class="pill" id="btnSpkLoud">响度增强 Turbo<em>升压满载 · 数字前级补偿</em></button>
         <button class="pill" id="btnSpkFlat">一键优化 (44.1k / 24bit)<em>44.1k 曲库 · 推荐</em></button>
         <button class="pill" id="btnSpkAuto">还原 auto (16bit)<em>回到原厂</em></button>
       </div>
     </div>
 
+    <div class="field">
+      <div class="field-hd">
+        <label>扬声器采样率档位</label>
+        <span class="field-badge">Speaker Rate</span>
+      </div>
+      <p class="hint">手机<strong>扬声器 / 听筒</strong>端口的采样率：44.1k 曲库选 <strong>44.1 kHz（推荐）</strong>，其他情况保留 <strong>auto</strong>＝原厂；不要往下选（有损下采样）。</p>
+      <div class="pills" id="pillSpk"></div>
+      <details class="tech-note">
+        <summary>展开外放免 SRC 与蓝牙同端口说明</summary>
+        <p class="hint"><strong>超越原厂</strong>：原厂扬声器端口常<strong>锁死 48 kHz</strong>，44.1k 音乐外放必被重采样 —— 钉到 <strong>44.1 kHz</strong> 后外放同样零重采样，与混音率组成全链路免 SRC。<br>
+        <strong>操作</strong>：外放听音乐钉 44.1k，在「深度校验 ⑤」看到「扬声器档位生效 ✅」即达成；外放看视频为主则保留 <code>auto</code>。蓝牙音箱 / 车机走同一端口，SBC / AAC 设备听感变差先回 <code>auto</code> 验证。</p>
+      </details>
+    </div>
+
+    <div class="field">
+      <div class="field-hd">
+        <label>扬声器位深上限</label>
+        <span class="field-badge">Speaker Bits</span>
+      </div>
+      <p class="hint">内置 DAC 多有 24bit 能力，原厂策略却常只声明 16bit，补到 <strong>24-bit（推荐）</strong> 可减少播放截位损耗。确定硬件支持 32bit 才选 32-bit；选高于硬件能力可能扬声器<strong>无声</strong>。</p>
+      <div class="pills" id="pillSpkBits"></div>
+    </div>
+
+    <div class="field">
+      <div class="field-hd">
+        <label>DSP 位宽强制</label>
+        <span class="field-badge">QTI ADSP ASM</span>
+      </div>
+      <p class="hint">把高通 QTI 的 ADSP <strong>ASM 流强制到指定位宽</strong>（注入属性 <code>persist.vendor.audio_hal.dsp_bit_width_enforce_mode</code>）。推荐 <strong>24-bit</strong>；<strong>16（关）</strong>＝原厂行为，出问题第一个回退到它。</p>
+      <div class="pills" id="pillSpkDsp"></div>
+      <details class="tech-note">
+        <summary>展开 ADSP 位宽注入与音效排障顺序</summary>
+        <p class="hint"><strong>超越原厂</strong>：原厂从不注入该属性，ADSP 混音链路按默认位宽<strong>中间截位</strong> —— 强制到 <strong>24-bit</strong> 后扬声器链路以更高位宽工作。<br>
+        <strong>操作</strong>：先在系统设置<strong>关闭杜比 / 空间音频等厂商音效</strong>（排除 DSP 叠加干扰），再选 24-bit 点「应用并生效」，重启音频服务后在「深度校验 ⑥」看到「已注入」且 live 属性 = 24 即达成。若叠加厂商音效反而变差，顺序回退「关音效 → DSP 回 16 → 位深回 16」。</p>
+      </details>
+    </div>
+
+    <!-- SMART PA POWER CONSOLE (Upgraded Acoustic VU Meter + A/B & Safe Reset) -->
+    <div class="field pa-zone">
+      <div class="pa-header">
+        <div>
+          <span class="pa-tag">HARDWARE GAIN STAGE · TFA9874 / WSA</span>
+          <label>Smart PA 功放硬件增益调谐</label>
+        </div>
+        <span class="pa-readout mono tabular" id="paMeterReadout">0 dB · SAFE</span>
+      </div>
+
+      <!-- Stepped Acoustic VU / Level Meter (0 to +6 dB) -->
+      <div class="pa-meter" id="paMeter" aria-label="Smart PA 功率阶梯电平表">
+        <div class="pa-seg safe active" data-lv="0"><span>0dB</span><i></i></div>
+        <div class="pa-seg low" data-lv="1"><span>+1</span><i></i></div>
+        <div class="pa-seg low" data-lv="2"><span>+2</span><i></i></div>
+        <div class="pa-seg mid" data-lv="3"><span>+3</span><i></i></div>
+        <div class="pa-seg mid" data-lv="4"><span>+4</span><i></i></div>
+        <div class="pa-seg high" data-lv="5"><span>+5</span><i></i></div>
+        <div class="pa-seg high" data-lv="6"><span>+6</span><i></i></div>
+      </div>
+
+      <!-- Acoustic Anti-Overload Warning Callout -->
+      <div class="pa-warning-box">
+        <p class="hint"><strong class="pa-alert">⚠️ 声学防过载警示：本档位直接提升功放芯片输出功率。</strong>超振膜极限会导致<strong>不可逆硬件损伤</strong>（破膜/烧音圈/永久失真）。<br>
+        · <strong>安全守则</strong>：保持<strong>出厂 0</strong> 最安全；确需增强请从 <strong>+1dB 起步、每档试听满 24h</strong>；听到<strong>破音/闷响/忽大忽小</strong>立即点下方「安全复位 0dB」。</p>
+        <details class="tech-note pa-note">
+          <summary>为什么 +6dB 不等于更好听？（防负优化说明）</summary>
+          <p class="hint">响度每提升 +3dB 驱动功率翻倍，谐波失真与削峰（Clipping）同步剧增，多数机型超过 +3dB 听感收益转负；boost 建议保持<strong>满档 2</strong>（出厂基准），降档仅省电不保真。</p>
+        </details>
+      </div>
+
+      <!-- Required #pillPa container -->
+      <div class="pills pa-pills" id="pillPa"></div>
+
+      <!-- Intuitive A/B Audition Compare & Instant 0dB Safe Reset -->
+      <div class="pa-quick-bar">
+        <button type="button" class="btn small pa-ab-btn" id="btnPaAB" title="在出厂 0dB 与您选定的增益档之间快速切换对比听感">
+          <svg class="ic-btn" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span id="paAbLabel">A/B 试听对比 (0dB ⇄ +1dB)</span>
+        </button>
+        <button type="button" class="btn small pa-safe-btn" id="btnPaSafeReset" title="无需二次确认，立即将功放恢复至出厂 0dB 安全功率">
+          <svg class="ic-btn" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          一键安全复位 0dB
+        </button>
+      </div>
+
+      <p class="hint pa-state-line mono" id="paState">—</p>
+    </div>
 
     <div class="field row">
       <div>
@@ -188,19 +304,24 @@
     </div>
   </section>
 
-  <section class="actions">
+  <!-- ==================== STICKY ERGONOMIC ACTION DOCK ==================== -->
+  <section class="actions" aria-label="核心操作栏">
     <button id="btnApply" class="btn primary">应用并生效</button>
     <button id="btnReset" class="btn solid-danger">一键还原</button>
   </section>
 
+  <!-- ==================== CUSTOM BACKGROUND STUDIO ==================== -->
   <section class="card" id="bgCard">
     <div class="card-head">
-      <h2>背景图</h2>
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.5" fill="currentColor"/><path d="M21 15l-5-5L5 21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h2>玻璃拟态与背景画布</h2>
+      </div>
       <button id="btnBgOff" class="btn small ghost">关闭背景</button>
     </div>
     <div class="pills" id="pillBg"></div>
     <div class="field">
-      <label>面板不透明度 <span id="bgOpacityVal">50%</span></label>
+      <label>面板不透明度 <span id="bgOpacityVal" class="mono tabular">50%</span></label>
       <input type="range" id="bgOpacity" min="0" max="100" step="5" value="50">
       <p class="hint">背景开启时，卡片与档位面板底色的不透明度：0%＝面板全透明（背景最透出），100%＝面板完全不透明。文字始终保持不透明以保证可读。</p>
     </div>
@@ -225,9 +346,91 @@
     <p class="hint" id="bgState">—</p>
   </section>
 
+  <!-- ==================== ZONE 3: DIAGNOSTICS & EVIDENCE TERMINALS ==================== -->
+  <section class="card">
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="19" x2="20" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <h2>运行日志</h2>
+      </div>
+      <div class="card-tools">
+        <button type="button" class="btn small ghost btn-copy" data-copy="logBox">复制</button>
+        <button id="btnRefresh" class="btn small ghost">刷新</button>
+      </div>
+    </div>
+    <div class="term-wrap">
+      <pre id="logBox" class="log">—</pre>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v4m0 4h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <h2>自检（排障用）</h2>
+      </div>
+      <div class="card-tools">
+        <button type="button" class="btn small ghost btn-copy" data-copy="diagBox">复制</button>
+        <button id="btnDiag" class="btn small ghost">重新自检</button>
+      </div>
+    </div>
+    <div class="term-wrap">
+      <pre id="diagBox" class="log">—</pre>
+    </div>
+    <p class="hint">状态读不出来时，把这里的内容复制或截图发出来即可定位问题：它显示 WebUI 找到了哪个 root 桥接、用的是哪一种调用形式、解析到的模块目录，以及最后一条命令的原始返回（errno / stdout / stderr）。</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h2>深度校验（四层证据）</h2>
+      </div>
+      <div class="card-tools">
+        <button type="button" class="btn small ghost btn-fold" data-fold="doctorBox" title="折叠或展开各层证据分段">分段折叠</button>
+        <button type="button" class="btn small ghost btn-copy" data-copy="doctorBox">复制</button>
+        <button id="btnDoctor" class="btn small primary-ghost">开始校验</button>
+      </div>
+    </div>
+    <div class="term-wrap">
+      <pre id="doctorBox" class="log tall">—</pre>
+    </div>
+    <p class="hint"><strong>档位设了却不生效？先跑这里。</strong>它一次 <code>hifi doctor</code>（只跑 <code>[1]–[7]</code>），把「到底有没有真正生效」拆成四层证据：<br>
+    <strong>A 配置层</strong> 生效文件里端口的上限与位深 → <strong>B 系统层</strong> audioserver 读到的内容 →
+    <strong>C 能力层</strong> 解码器<em>声明</em>支持什么（<strong>不代表在跑</strong>）→
+    <strong>D 链路层</strong> 此刻真正协商出的 <code>rate</code> / <code>format</code> 与占用进程。</p>
+    <details class="tech-note">
+      <summary>展开 D 层 closed 三种状态判定说明</summary>
+      <p class="hint">· <strong>D1</strong> 找到 0 个 pcm 目录 = 本机内核没导出这棵树（<em>不是模块没生效，改检测也没用，以 5b/5c 为准</em>）；<br>
+      · <strong>D2</strong> 有目录但全 closed = 检测时暂停了，或播放器正用自带 USB 驱动独占；<br>
+      · <strong>D3</strong> 有打开的流 = 出明细。<br>
+      5c 段会直接点名网易云 / QQ音乐 / 海贝此刻走的是<strong>直通</strong>、<strong>混音路径</strong>还是<strong>没走音频栈</strong>。末尾 <code>[7]</code> 就是<strong>当前实际输出状态速览</strong>，一屏可见。</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="sec-title">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="14 2 14 8 20 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h2>机型适配校验</h2>
+      </div>
+      <div class="card-tools">
+        <button type="button" class="btn small ghost btn-fold" data-fold="adaptBox" title="折叠或展开适配段落">分段折叠</button>
+        <button type="button" class="btn small ghost btn-copy" data-copy="adaptBox">复制</button>
+        <button id="btnAdapt" class="btn small ghost">采集适配信息</button>
+      </div>
+    </div>
+    <div class="term-wrap">
+      <pre id="adaptBox" class="log tall">—</pre>
+    </div>
+    <p class="hint"><strong>这一块解决什么：</strong>当你换了机型、或刷入后<strong>完全无效</strong>时，需要把「本机的病历」发给维护者。跑的是 <code>hifi adapt</code>，只做检测、不改任何东西，回答三件事：<br>
+    <strong>① 策略文件清单与跳过原因</strong> → <strong>② 策略基线来源</strong> → <strong>③ 音频输出真实路径与声卡号</strong>。</p>
+  </section>
+
+  <!-- ==================== SAFETY & ARCHITECTURE NOTES ==================== -->
   <section class="card danger-zone">
     <div class="card-head">
-      <h2>一键还原</h2>
+      <h2>一键还原说明</h2>
       <span class="badge ghost">无损 · 可逆</span>
     </div>
     <ul>
@@ -236,56 +439,6 @@
       <li>还原后模块仍然装着但处于停用状态，<strong>你设过的参数会保留</strong>，再点一次「应用并生效」就回到原来的配置。</li>
       <li>想彻底清除：在 KernelSU / Magisk / APatch 里卸载本模块。卸载脚本会自动卸载挂载、清理 <code>/data/adb/hifi_src_bypass</code> 的全部残留并还原原厂策略。</li>
     </ul>
-  </section>
-
-  <section class="card">
-    <div class="card-head">
-      <h2>运行日志</h2>
-      <button id="btnRefresh" class="btn small ghost">刷新</button>
-    </div>
-    <pre id="logBox" class="log">—</pre>
-  </section>
-
-  <section class="card">
-    <div class="card-head">
-      <h2>自检（排障用）</h2>
-      <button id="btnDiag" class="btn small ghost">重新自检</button>
-    </div>
-    <pre id="diagBox" class="log">—</pre>
-    <p class="hint">状态读不出来时，把这里的内容截图发出来即可定位问题：它显示 WebUI 找到了哪个 root 桥接、用的是哪一种调用形式、解析到的模块目录，以及最后一条命令的原始返回（errno / stdout / stderr）。</p>
-  </section>
-
-  <section class="card">
-    <div class="card-head">
-      <h2>深度校验（四层证据）</h2>
-      <button id="btnDoctor" class="btn small ghost">开始校验</button>
-    </div>
-    <pre id="doctorBox" class="log tall">—</pre>
-    <p class="hint"><strong>档位设了却不生效？先跑这里。</strong>它一次 <code>hifi doctor</code>（只跑 <code>[1]–[7]</code>），把「到底有没有真正生效」拆成四层证据：<br>
-    <strong>A 配置层</strong> 生效文件里端口的上限与位深 → <strong>B 系统层</strong> audioserver 读到的内容 →
-    <strong>C 能力层</strong> 解码器<em>声明</em>支持什么（<strong>不代表在跑</strong>）→
-    <strong>D 链路层</strong> 此刻真正协商出的 <code>rate</code> / <code>format</code> 与占用进程。<br>
-    <strong>D 层显示 closed 有三种完全不同的含义</strong>，会自动判定是哪一种：<br>
-    · <strong>D1</strong> 找到 0 个 pcm 目录 = 本机内核没导出这棵树（<em>不是模块没生效，改检测也没用，以 5b/5c 为准</em>）；<br>
-    · <strong>D2</strong> 有目录但全 closed = 检测时暂停了，或播放器正用自带 USB 驱动独占；<br>
-    · <strong>D3</strong> 有打开的流 = 出明细。<br>
-    5c 段会直接点名网易云 / QQ音乐 / 海贝此刻走的是<strong>直通</strong>、<strong>混音路径</strong>还是<strong>没走音频栈</strong>。<br>
-    末尾 <code>[7]</code> 就是<strong>当前实际输出状态速览</strong>，一屏可见。<strong>换机型 / 刷入无效</strong>要发给维护者的那一段（原 <code>[8]</code>）已移到下面的<strong>「机型适配校验」</strong>。</p>
-  </section>
-
-  <section class="card">
-    <div class="card-head">
-      <h2>机型适配校验</h2>
-      <button id="btnAdapt" class="btn small ghost">采集适配信息</button>
-    </div>
-    <pre id="adaptBox" class="log tall">—</pre>
-    <p class="hint"><strong>这一块解决什么：</strong>当你换了机型、或刷入后<strong>完全无效</strong>时，需要把「本机的病历」发给维护者。
-    它和上面的深度校验是<strong>独立的</strong>，所以深度校验窗口一打开就是实时输出状态，不用再往下翻找。<br>
-    跑的是 <code>hifi adapt</code>（等于 <code>HIFI_PROBE_SECTION=adapt hifi doctor</code>），只做检测、不改任何东西，回答三件事：<br>
-    <strong>① 这台机器到底有哪些策略文件</strong>，模块为什么补了它 / 跳过了它（含上次扫描的逐条结论）→
-    <strong>② 策略基线是什么</strong>（模块挂载的东西是从哪份原厂件生成的）→
-    <strong>③ 音频输出在系统里的真实路径</strong>（Config source 指向哪份文件、逻辑端口名、内核设备节点与声卡号）。<br>
-    反馈时请把这一整段<strong>连同上面深度校验的「排查明细」</strong>一起发回来，再补一句：型号 / 系统版本 / 小尾巴型号 / 具体现象。</p>
   </section>
 
   <section class="card notes">

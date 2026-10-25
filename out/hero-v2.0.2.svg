@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 240" width="1280" height="240" role="img" aria-label="HiFi SRC Bypass v2.0.2 —— 全机型 Android 音频直通 / SRC 绕过">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b0e14"/>
+      <stop offset="55%" stop-color="#10151f"/>
+      <stop offset="100%" stop-color="#0b0e14"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#f472b6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="240" fill="url(#bg)"/>
+  <rect width="1280" height="4" fill="url(#bar)"/>
+
+  <!-- 左侧声学装饰：四条电平条 -->
+  <g fill="#1e293b">
+    <rect x="80" y="168" width="120" height="10" rx="5"/>
+    <rect x="80" y="186" width="120" height="10" rx="5"/>
+    <rect x="80" y="204" width="120" height="10" rx="5"/>
+  </g>
+  <g fill="url(#bar)">
+    <rect x="80" y="168" width="96" height="10" rx="5" opacity="0.95"/>
+    <rect x="80" y="186" width="62" height="10" rx="5" opacity="0.75"/>
+    <rect x="80" y="204" width="34" height="10" rx="5" opacity="0.55"/>
+  </g>
+
+  <text x="80" y="108"
+        font-family="Noto Sans CJK SC, Noto Sans, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="60" font-weight="700" fill="#f8fafc" letter-spacing="0.5">HiFi SRC Bypass</text>
+
+  <text x="82" y="146"
+        font-family="Noto Sans CJK SC, Noto Sans, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="24" font-weight="400" fill="#94a3b8">Android 全机型音频直通 · SRC 绕过 · 四处上限一起解</text>
+
+  <g font-family="Noto Sans CJK SC, Noto Sans, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"
+     font-size="17" font-weight="500">
+    <rect x="820" y="72" width="196" height="40" rx="20" fill="#0f172a" stroke="#22d3ee" stroke-opacity="0.55"/>
+    <text x="918" y="98" text-anchor="middle" fill="#67e8f9">v2.0.2</text>
+
+    <rect x="1032" y="72" width="168" height="40" rx="20" fill="#0f172a" stroke="#818cf8" stroke-opacity="0.55"/>
+    <text x="1116" y="98" text-anchor="middle" fill="#a5b4fc">KernelSU</text>
+
+    <rect x="820" y="124" width="196" height="40" rx="20" fill="#0f172a" stroke="#34d399" stroke-opacity="0.55"/>
+    <text x="918" y="150" text-anchor="middle" fill="#6ee7b7">Magisk / APatch</text>
+
+    <rect x="1032" y="124" width="168" height="40" rx="20" fill="#0f172a" stroke="#f472b6" stroke-opacity="0.55"/>
+    <text x="1116" y="150" text-anchor="middle" fill="#f9a8d4">96k→384k</text>
+
+    <rect x="820" y="176" width="380" height="40" rx="20" fill="#0f172a" stroke="#fbbf24" stroke-opacity="0.5"/>
+    <text x="1010" y="202" text-anchor="middle" fill="#fcd34d">16 / 24 / 32 bit · 混音率可对齐音源</text>
+  </g>
+</svg>

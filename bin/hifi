@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - universal USB / wired SRC bypass
-#                                on-device controller            v2.0.0
+#                                on-device controller            v2.0.2
 #
 #   what it does
 #     The factory audio policy of THIS phone is located automatically -- no
@@ -64,6 +64,13 @@ CACHE="$STATE/targets.cache"
 PATCHER="$MODDIR/payload/patch_policy.awk"
 CHECKER="$MODDIR/payload/check_policy.awk"
 HALPATCH="$MODDIR/payload/patch_hal.sh"
+# Fourth layer: the volume CURVE, not the rate table.  AOSP caps loudness at the
+# last <point> of each (stream, device) curve; a ROM that is afraid of its own
+# loudspeaker leaves that step short of 0 dB (-300 = -3 dB is typical), so no
+# volume-key press can ever reach full scale.  Lifting the tail of exactly one
+# curve -- speaker + music -- is what raises the maximum acoustic output.
+VOLPATCH="$MODDIR/payload/patch_volume.awk"
+VOLCHECK="$MODDIR/payload/check_volume.awk"
 
 # The old OnePlus-13-only module.  If it is still installed, its bind mount
 # would fight ours, so we notice it and say so instead of failing cryptically.
@@ -79,6 +86,9 @@ MAX_RATE=384000
 BIT_DEPTH=32
 ENABLED=1
 RESTART=1
+# the user's own restart preference, as read from config.conf; do_restore writes
+# THIS back, never the value a suppressed run happened to use
+RESTART_PERSIST=1
 # The vendor HiFi port ("hifi_playback"): on Qualcomm/OnePlus-style ROMs USB
 # audio plays through THIS port, not deep_buffer.  It ships as a *dynamic*
 # mixPort, so the policy pins it to whatever the DAC advertises as its maximum
@@ -116,6 +126,31 @@ SPK_DSP_BITS=16
 # policy mount layer: restore never touches the PA controls.
 PA_GAIN=""
 PA_BOOST=""
+# Speaker loudness mode (0 / 1 / 2, default 0 = never touch anything).
+#
+#   0 = 不碰（原有行为）
+#   1 = 只做硬件 IIR 高通：把扬声器发不出的超低频砍掉，释放振膜行程
+#   2 = 额外允许把数字前端音量压到 72（Qualcomm 衰减索引，数值小 = 更响）
+#
+# 为什么不再推 PA 增益：TFA9874 的 G_DEFAULT 在硬件固件里等于满载 G_6_DB。
+# 真机声学实测（原厂 0dB 档 vs 模块 +6dB 档，两条录音全采样分析）RMS 差
+# -0.41 dB、1000 Hz 基波差 -0.37 dB、峰值差 -0.45 dB —— 同一个输出。所以
+# 推 PA 增益是零收益；真正的瓶颈在振膜行程被无效低频吃掉，TFA 的 DSP 限幅器
+# 一直被那些发不出来的频率触发，把中高频一起压下去。
+SPK_LOUD=0
+# Volume-curve ceiling unlock (the fourth layer).  0 = never touch a volume
+# table (factory behaviour, the safe default); 1 = lift the last VOL_POINTS
+# steps of the AUDIO_STREAM_MUSIC / DEVICE_CATEGORY_SPEAKER curve to 0 dB.
+# Deliberately a separate switch from everything else: it is the only knob in
+# this module that changes how LOUD the phone is allowed to be, so it must be
+# possible to have the rate work without it -- and to turn it off again without
+# disturbing the rate work.
+VOL_UNLOCK=0
+# Trailing steps of the curve to lift when VOL_UNLOCK=1.  3 is the last ~3% of a
+# 101-step AOSP curve: the three volume-key presses that a conservative ROM
+# leaves unusable.  Not a config key on purpose -- nobody needs to tune it, and
+# a config value that silently changes the loudness ceiling is a footgun.
+VOL_POINTS=3
 
 DIRECT_POOL="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
 USB_POOL="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
@@ -153,6 +188,30 @@ FIXED_CANDIDATES="
 # We only ever touch these two sonames -- they are the AOSP USB HAL, they are
 # optional, and their absence is a perfectly normal result (not an error).
 HAL_LIBS="libalsautils.so libalsautilsv2.so"
+
+# ------------------------------------------------- the volume tables (layer 4)
+# ONLY these two names are unlocked, and the whitelist is exact on purpose:
+#
+#   audio_policy_volumes.xml     <volume stream=... deviceCategory=...> curves
+#   default_volume_tables.xml    <reference name=...VOLUME_CURVE> curves
+#
+# The rest of the *volumes* family that a ROM may <xi:include> is deliberately
+# left alone:
+#
+#   audio_policy_engine_stream_volumes.xml
+#   audio_policy_engine_default_stream_volumes.xml
+#   *_stream_volumes_mi.xml   (MIUI/HyperOS vendor copy)
+#
+# Those belong to the AudioPolicy *engine* configuration: they describe how the
+# engine scales a stream for one of its own product strategies, and they are
+# consumed by a different parser with a different default-value mechanism.  The
+# two framework tables above are the ones AudioPolicyManager resolves the user's
+# volume index through, so they are where a ceiling actually lives.  Rewriting
+# the engine tables would change strategy behaviour (call/assistant ducking) that
+# this module has no business touching -- so they are recognised, reported and
+# skipped with a reason instead of being silently fed to the policy patcher.
+VOL_NAMES="audio_policy_volumes.xml default_volume_tables.xml"
+VOL_ENGINE_RE="*stream_volumes*.xml"
 HAL_DIRS="
 /odm/lib64
 /odm/lib
@@ -182,8 +241,155 @@ ensure_dirs() {
   chmod 0755 "$STATE" "$STATE/stock" "$STATE/patched" 2>/dev/null
 }
 
+# ============================================================================
+# JSON string safety.
+#
+# A WebUI ("json") answer is consumed by KSU's bridge and by JSON.parse, so any
+# byte the JSON grammar forbids turns the WHOLE object into a parse error and
+# the page loses every field -- including the ones that were fine.  The values
+# here are not under our control: log lines carry device output, DAC names come
+# from /proc/asound/<card>/stream0, target paths come from the ROM's own
+# filesystem.  One carriage return, one ANSI colour escape, one ESC / form feed
+# / vertical tab byte is enough to destroy the page.
+#
+# 🔴 THE BYTE CLASS STOPS AT 0x7F, AND THAT IS LOAD-BEARING.
+# An earlier version of this function also stripped 0x80-0x9F on the theory that
+# it is "the C1 block".  That is a UTF-8 KILLER: in every CJK code point the
+# continuation bytes run 0x80-0xBF, so a large share of Chinese characters carry
+# a byte in 0x80-0x9F (一 = E4 B8 80, 中 = E4 B8 AD).  Stripping the range
+# amputated 74.4% of the CJK corpus -- and did so INCONSISTENTLY, because
+# whether awk sees a byte or a character there depends on the locale:
+#   * mawk / busybox awk (byte mode) -> #<80>..#<9F> matched BYTES, so
+#     mid-character deletion produced invalid UTF-8;
+#   * gawk in a UTF-8 locale          -> the range is read as the CHARACTERS
+#     U+0080..U+009F and gawk aborts with "Invalid collation character", so the
+#     whole json_escape died (rc=1) and the answer contained nothing at all.
+# A REGEX RANGE CANNOT SEPARATE "C1 byte" FROM "CJK continuation byte" -- they
+# are the same octets in a byte-wise reader.  So the range stays out entirely.
+#
+# The two C1 cases that DO matter are handled by exact sequences, never by a
+# range, because in well-formed UTF-8 a multi-byte pattern can only match the
+# character it names:
+#   * U+0085 NEL, which the device log corpus carries -> matched as #<C2>#<85>.
+#   * U+009B CSI, the C1 form of the ANSI escape introducer: `\233[1;31m`
+#     (the 8-bit CSI sequence) is removed AS A WHOLE below, exactly like the
+#     7-bit `\033[1;31m` form.  \233 is only matched when followed by `[` and a
+#     real CSI parameter/terminator, so a lone 0x9B cannot be confused with a
+#     continuation byte here either.
+#
+# WHAT IS STILL OUT OF REACH, STATED HONESTLY: awk cannot validate UTF-8, so a
+# LONE 0x9B (or a truncated multi-byte sequence such as 0xE4 followed by ASCII)
+# survives this pass.  That is why json_str -- the funnel every field actually
+# goes through -- runs iconv(1) as a final UTF-8 validator, and why the raw
+# json_escape output is documented as "byte-cleaned, not UTF-8-validated".
+# Don't read the class above as "C1 is fully handled by regex".
+#
+# TABS: json_escape keeps them (they are not a byte-safety problem), and the
+# JSON-mandated \t escape is applied by json_str -- the single funnel every
+# string field of the answer goes through.  See the note on json_str.
+#
+# Order matters:
+#   1. ANSI colour/attribute sequences are removed AS WHOLE SEQUENCES first, so
+#      cutting the ESC byte does not leave the visible "[1;31m" debris behind.
+#      Both the 7-bit (\033[) and 8-bit (\233[) introducers get their own rule.
+#   2. Every remaining illegal byte is stripped: 0x01-0x1F except \n (which the
+#      line separator consumes), plus 0x7F (DEL), plus the NEL encoding above.
+#      \r \v \f are removed rather than re-encoded -- a stripped byte can never
+#      be mis-parsed, and the consumers here render these strings as display
+#      text, not as payload.
+#   3. `\` is escaped BEFORE `"`: otherwise the quote's escape character would
+#      itself be escaped and the string would end early.
+#
+# The class is written with explicit octal escapes because \x is a gawk
+# extension that busybox awk would read as a literal "x0".
 json_escape() {
-  awk 'BEGIN{ORS=""} {gsub(/[\\]/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/," "); print $0 "\\n"}'
+  awk '
+    BEGIN { ORS = ""; first = 1 }
+    {
+      if (!first) printf "\\n"
+      first = 0
+      # 7-bit CSI: ESC [ params final
+      gsub(/\033\[[0-9;]*[A-Za-z]/, "")
+      # 8-bit CSI (C1 0x9B): the ECMA-48 single-byte introducer.  Removed with
+      # its parameter bytes and terminator, so no "[1;31m" debris is left.
+      gsub(/\233\[[0-9;]*[A-Za-z]/, "")
+      gsub(/[\001-\010\013-\037\177]/, "")
+      gsub(/\302\205/, "")
+      gsub(/\\/, "\\\\")
+      gsub(/"/, "\\\"")
+      print $0
+    }'
+}
+
+# iconv availability is PROBED, not assumed.  Android ships it as a toybox
+# applet (verified on the K20 Pro: /system/bin/iconv -> toybox, and it drops a
+# lone 0x9B while keeping CJK and emoji byte-for-byte), but a minimal or
+# stripped ROM may not have it -- in that case json_str degrades to the
+# regex-only path documented above instead of failing.
+#
+# The probe runs a REAL conversion of a string that contains an isolated C1
+# byte: a bare symlink can exist while the applet itself is missing from the
+# toybox build, and an iconv without -c would fail on exactly this input.
+ICONV_BIN=""
+for c in /system/bin/iconv /system/xbin/iconv; do
+  [ -x "$c" ] || continue
+  if printf 'A\233B\n' | "$c" -f UTF-8 -t UTF-8 -c 2>/dev/null | grep -q '^AB$'; then
+    ICONV_BIN="$c"; break
+  fi
+done
+if [ -z "$ICONV_BIN" ]; then
+  c="$(command -v iconv 2>/dev/null)"
+  if [ -n "$c" ] && printf 'A\233B\n' | "$c" -f UTF-8 -t UTF-8 -c 2>/dev/null | grep -q '^AB$'; then
+    ICONV_BIN="$c"
+  fi
+fi
+
+# The single funnel every string field of status_json goes through -- callers
+# must not interpolate a raw value into a printf '"%s"' (a path, a DAC name or a
+# property value can carry anything).  Three things happen here, in this order:
+#
+#   1. json_escape -- strip the illegal bytes, remove ANSI sequences, escape
+#      `\` and `"`.  It MUST run first: it is what removes the 8-bit CSI sequence
+#      (\233[1;31m) AS A WHOLE.  Feeding the raw value to iconv first would eat
+#      the lone 0x9B introducer and leave the visible "[1;31m" debris behind.
+#
+#   2. iconv -f UTF-8 -t UTF-8 -c -- the UTF-8 VALIDITY pass.  Regex cannot tell
+#      a C1 byte from a CJK continuation byte (same octets), and it cannot reject
+#      a truncated sequence such as 0xE4 followed by ASCII, so a lone 0x9B
+#      survives step 1 by design.  iconv can: it discards exactly the bytes that
+#      are not valid UTF-8 and passes everything else through untouched.  This is
+#      the pass that makes "python json.loads / JSON.parse both accept it"
+#      hold on a real log, which may carry any byte a device driver printed.
+#
+#      READ THE EXIT STATUS CORRECTLY -- this is where the previous attempt went
+#      wrong.  `iconv -c` ALWAYS exits non-zero when it actually drops something
+#      ("A\233B" -> stdout "AB", rc=1); rc=0 only means "nothing was discarded".
+#      Gating the assignment on `rc == 0` therefore throws away exactly the
+#      cleaned result and keeps the poisoned one -- the pass looked present and
+#      did nothing.  What matters is whether iconv produced OUTPUT, not whether
+#      it was happy: an empty result for a non-empty input means the conversion
+#      failed wholesale (wrong locale, broken applet) and the un-sanitised value
+#      is kept, because a rare stray byte is a smaller problem than an emptied
+#      field; any non-empty result IS the validated value, whatever the rc.
+#
+#   3. TAB -> \t.  A literal 0x09 inside a JSON string is INVALID (RFC 8259:
+#      U+0000-U+001F must be escaped), so `json.loads` and JSON.parse both reject
+#      the whole object over a single tab in a log line.  json_escape leaves the
+#      byte alone so that the cleaner stays a byte filter; json_str is where JSON
+#      *grammar* is honoured.  Ordering it last means the backslash it introduces
+#      is not re-escaped by step 1.
+#
+# Numbers stay raw on purpose: they are validated counters and must serialise as
+# JSON numbers.
+json_str() {
+  _v="$(printf '%s' "$1" | json_escape)"
+  if [ -n "$ICONV_BIN" ] && [ -n "$_v" ]; then
+    # `-c` exits 1 whenever it drops a byte, so the rc is NOT the success signal
+    # here; "did it come back with anything" is.  See the note above.
+    _s="$(printf '%s' "$_v" | "$ICONV_BIN" -f UTF-8 -t UTF-8 -c 2>/dev/null)"
+    [ -n "$_s" ] && _v="$_s"
+  fi
+  printf '%s' "$_v" | awk 'BEGIN { ORS = "" } { gsub(/\t/, "\\t"); print }'
 }
 
 flatten() { printf '%s' "$1" | tr '/.' '__'; }
@@ -194,10 +400,50 @@ is_mounted() {
   awk -v t="$1" '$2 == t { found = 1 } END { exit !found }' "$MOUNTS" 2>/dev/null
 }
 
-# The two layers are verified completely differently: a policy XML carries our
+# The three layers are verified completely differently: a policy XML carries our
 # text marker, a HAL library can never carry it -- there we look for the rate
-# table instead.  Everything that asks "is this target live?" goes through here.
+# table instead, and a volume table cannot carry a marker EITHER because the
+# whole point of that patch is that the file keeps its exact byte length (see
+# payload/patch_volume.awk).  Everything that asks "is this target live?" goes
+# through here.
 is_hal_target() { case "$1" in *.so) return 0 ;; esac; return 1; }
+
+# Is $1 one of the two framework volume tables we are allowed to unlock?
+# Exact name match, not a *volume* glob: audio_policy_engine_stream_volumes.xml
+# and the MIUI *_stream_volumes_mi.xml are volume tables of a DIFFERENT kind (the
+# AudioPolicy engine's own strategy scaling) and are intentionally out of scope.
+is_volume_target() {
+  case "$(basename "$1" 2>/dev/null)" in
+    audio_policy_volumes.xml|default_volume_tables.xml) return 0 ;;
+  esac
+  return 1
+}
+
+# A volume table the module recognises but deliberately does not unlock.
+# Reported by name so the log explains the SKIP instead of claiming the file
+# "is not an audio policy file" -- which is what the pre-2.0 build wrote for
+# every volume table it stumbled over through <xi:include>.
+is_volume_engine_target() {
+  case "$(basename "$1" 2>/dev/null)" in
+    *stream_volumes*.xml|*volume_tables_engine*.xml) return 0 ;;
+  esac
+  return 1
+}
+
+# Is the speaker/music curve at $1 already at full scale?
+#
+# A volume table carries NO marker and its byte length is fixed, so identity has
+# to be established by reading it: compare the live file against the archived
+# factory copy with the same checker that gates the mount.  exit 0 = the live
+# file is exactly "factory + lifted tail", which is the definition of applied.
+is_volume_unlocked() {
+  live="$1"
+  [ -r "$live" ] || return 1
+  [ -n "${VOLCHECK:-}" ] && [ -r "$VOLCHECK" ] || return 1
+  stk="$STATE/stock/$(flatten "$live")"
+  [ -r "$stk" ] || return 1
+  awk -v SPK_POINTS="$VOL_POINTS" -f "$VOLCHECK" "$stk" "$live" >/dev/null 2>&1
+}
 
 is_hal_unlocked() {
   [ -r "$HALPATCH" ] || return 1
@@ -223,7 +469,9 @@ hal_ceiling() {
 
 target_applied() {
   is_mounted "$1" || return 1
-  if is_hal_target "$1"; then is_hal_unlocked "$1"; else is_ours "$1"; fi
+  if is_hal_target "$1";    then is_hal_unlocked   "$1"; return; fi
+  if is_volume_target "$1"; then is_volume_unlocked "$1"; return; fi
+  is_ours "$1"
 }
 
 realpath_of() {
@@ -326,6 +574,46 @@ load_conf() {
   # smart PA knobs: "" (= factory / untouched) or a valid tier, never guessed
   case "$PA_GAIN" in ""|reset|[0-6]) ;; *) PA_GAIN="" ;; esac
   case "$PA_BOOST" in ""|reset|1|2) ;; *) PA_BOOST="" ;; esac
+  # speaker loudness mode: strictly 0 / 1 / 2.  Anything else -- a hand-edited
+  # conf, a truncated write, a value from a future build -- falls back to 0
+  # (leave the codec alone).  Same reasoning as VOL_UNLOCK: the safe failure
+  # mode of THIS knob is "nothing was changed", never "an unverified IIR
+  # coefficient set is running on the loudspeaker".
+  case "$SPK_LOUD" in 0|1|2) ;; *) SPK_LOUD=0 ;; esac
+  # volume-curve unlock: strictly 0 or 1.  Anything else (a hand-edited conf, a
+  # truncated write) falls back to 0 = do not touch a volume table, because the
+  # safe failure mode of THIS knob is "the phone is a bit quieter than it could
+  # be", not "the phone mounted a curve nobody verified".
+  case "$VOL_UNLOCK" in 0|1) ;; *) VOL_UNLOCK=0 ;; esac
+  # fixed, never read from the conf -- see the note at the default above
+  VOL_POINTS=3
+  # RESTART_PERSIST keeps the value the USER chose, whatever this run decides.
+  # do_restore saves the config on its way out (it flips ENABLED=0), so without
+  # this the suppressed RESTART=0 burned into config.conf would outlive the boot
+  # self-heal -- the exact regression t3/t4 check for, just reached through the
+  # other door.
+  RESTART_PERSIST="${RESTART_PERSIST:-$RESTART}"
+  case "$RESTART"  in 0|1) ;; *) RESTART=1 ;; esac
+  # ---- restart suppression, honoured where it actually matters ---------------
+  # service.sh's boot self-heal (P0-4) has to unmount a patch while audioserver
+  # is CRASH-LOOPING.  Restarting the audio stack there re-enters the loop the
+  # module is trying to escape, so the suppression must be settable per call:
+  #   HIFI_NO_RESTART=1        environment, applies to any command
+  #   HIFI_TRANSIENT=1         the existing "this run only" flag; it already
+  #                            means "the self-heal is driving, do not persist",
+  #                            and suppressing the restart is the other half of
+  #                            that same promise
+  #   HIFI_RESTART=0|1         explicit override of the persisted RESTART value
+  # Both spellings land on $RESTART, which is what do_apply/do_restore test, so
+  # there is exactly ONE branch to reason about.  This is the F2 fix: the old
+  # code suppressed the *save* but left $RESTART=1 from config.conf, and the
+  # self-heal restarted the crashing stack anyway.
+  case "${HIFI_RESTART:-}" in
+    0|1) RESTART="$HIFI_RESTART" ;;
+  esac
+  if [ "${HIFI_NO_RESTART:-0}" = 1 ] || [ "${HIFI_TRANSIENT:-0}" = 1 ]; then
+    RESTART=0
+  fi
   return 0
 }
 
@@ -372,10 +660,33 @@ PA_GAIN=$PA_GAIN
 # PA_BOOST   : smart PA boost max state (empty / reset = untouched, 1 = stepped
 #              down (saves power, clips earlier), 2 = factory full stage).
 PA_BOOST=$PA_BOOST
+# SPK_LOUD   : speaker loudness mode (0 / 1 / 2).
+#              0 = 不碰（原有行为）
+#              1 = hardware IIR high-pass only: cuts the sub-bass the TFA
+#                  loudspeaker cannot reproduce, which frees diaphragm
+#                  excursion so the PA's DSP limiter stops being tripped by
+#                  inaudible low frequencies and lets the mid/high band through
+#                  louder.
+#              2 = mode 1 + allowed to LOWER the Qualcomm digital front-end
+#                  volume to 72 (that control is an ATTENUATION index:
+#                  gain_dB = (124 - v) / 2, LARGER = QUIETER, so lowering the
+#                  number is the only direction that adds level).
+#              推 PA 增益不在此列：TFA9874 的 G_DEFAULT 在固件里就是满载。
+SPK_LOUD=$SPK_LOUD
+# VOL_UNLOCK : 1 = lift the ceiling of the speaker/music volume CURVE
+#              (audio_policy_volumes.xml + default_volume_tables.xml) by
+#              rewriting its last 3 steps from e.g. -300 mB to 0 dB.
+#              THIS CHANGES THE MAXIMUM ACOUSTIC OUTPUT OF THE LOUDSPEAKER:
+#              the digital limiter the ROM built in is removed at the top of
+#              the range, so a full-scale mix can clip the small speaker.
+#              0 = factory curve (default).  hifi restore is unconditional.
+VOL_UNLOCK=$VOL_UNLOCK
 # ENABLED    : 1 = patch mounted, 0 = factory policy in use
 ENABLED=$ENABLED
 # RESTART    : 1 = restart the audio stack right after applying, 0 = reboot later
-RESTART=$RESTART
+#              (the USER's value: a run that suppressed the restart -- the boot
+#               self-heal -- must not persist its own decision here)
+RESTART=${RESTART_PERSIST:-$RESTART}
 # HAL_PATCH  : 1 = also reorder the USB HAL's own sample-rate table
 #              (libalsautils{,v2}.so), which is a *lower* ceiling than the
 #              policy XML and the usual reason a dongle stays at 96 kHz.
@@ -427,6 +738,33 @@ scan_candidates() {
     done
   done
 
+  # layer 4: the volume tables.  They are reachable two ways and BOTH must work:
+  #   * the main policy <xi:include>s them, and the include follower above has
+  #     already appended them -- but ONLY if the main policy was found first, so
+  #     this is not a guarantee;
+  #   * a ROM may keep them next to the policy without including them (or the
+  #     framework reads them from /odm), so they are also looked up by name.
+  # VOL_UNLOCK=0 still SCANS them: the report must be able to say "this ROM has
+  # a speaker curve ending at -3 dB and you left it alone", which is how a user
+  # discovers the knob.  Only the patch step is gated by the switch.
+  for root in /odm /vendor /system/vendor /product /system/etc /system/product/etc; do
+    [ -d "$PROOT$root" ] || continue
+    for d in "$root" "$root/etc" "$root/etc/audio" "$root/audio"; do
+      for n in $VOL_NAMES; do
+        [ -f "$PROOT$d/$n" ] && found="$found $PROOT$d/$n"
+      done
+    done
+  done
+  # and once more by name, in case a vendor parked them somewhere non-standard
+  for root in /odm /vendor /product; do
+    [ -d "$PROOT$root" ] || continue
+    vh="$(find "$PROOT$root" -maxdepth 4 -type f \
+            \( -name 'audio_policy_volumes.xml' \
+               -o -name 'default_volume_tables.xml' \) \
+            2>/dev/null)"
+    [ -n "$vh" ] && found="$found $vh"
+  done
+
   # second layer: the AOSP USB HAL libraries
   if [ "$HAL_PATCH" = 1 ]; then
     for d in $HAL_DIRS; do
@@ -452,6 +790,66 @@ scan_candidates() {
     seen="$seen $rp"
     printf '%s\n' "$rp"
   done
+}
+
+# ============================================================ dialect probe
+# READ-ONLY classification of the policy XML currently on the device.  It
+# answers ONE question -- is this a QTI/AIDL file or an AOSP/HIDL one -- by
+# counting the two mutually exclusive format attributes the vendor dialects
+# use.  Comment blocks are stripped character-wise before counting, because
+# vendor files discuss both spellings inside <!-- --> and a naive grep would
+# read the prose as content (this exact bug shipped once).
+#
+# Nothing here writes, mounts or changes a file: it is a diagnostic, used by
+# `hifi status` and by the WebUI so the user can see which dialect their ROM
+# speaks without pulling files off the phone.
+#
+# exit 3 (no known format attribute) is mapped to the empty string: "this file
+# is not a policy" is a normal answer, not an error, and the callers below walk
+# on to the next candidate.
+dialect_of() {
+  awk '
+    { ln = $0
+      while (1) {
+        p = index(ln, "<!--")
+        if (p == 0) break
+        q = index(substr(ln, p), "-->")
+        if (q == 0) { ln = substr(ln, 1, p - 1); break }
+        ln = substr(ln, 1, p - 1) substr(ln, p + q + 2)
+      }
+      if (ln ~ /pcmType="/) qti++
+      else if (ln ~ /format="AUDIO_FORMAT_/) aosp++
+    }
+    END {
+      if (qti == 0 && aosp == 0) exit 3
+      print (qti >= aosp) ? "qti" : "aosp"
+    }' "$1" 2>/dev/null
+}
+
+# The device's policy dialect, discovered WITHOUT any prior state: prefer the
+# archived factory copy of every file we already mounted (it is the file the
+# ROM actually boots with), then fall back to a fresh scan.  Returns the empty
+# string when nothing on this ROM is a patchable policy -- never an error, so a
+# caller may always interpolate the result into a status line.
+current_dialect() {
+  if [ -r "$TGT" ]; then
+    while IFS='|' read -r live patched stk; do
+      [ -n "$live" ] || continue
+      is_hal_target "$live" && continue
+      is_volume_target "$live" && continue
+      [ -r "$stk" ] || continue
+      d="$(dialect_of "$stk")"
+      [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+    done < "$TGT"
+  fi
+  for f in $(candidate_list); do
+    case "$f" in *.so) continue ;; esac
+    is_volume_target "$f" && continue
+    [ -r "$f" ] || continue
+    d="$(dialect_of "$f")"
+    [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+  done
+  return 0
 }
 
 refresh_targets() {
@@ -537,10 +935,18 @@ enter_global_ns() {
 # Echoes nothing; sets GEN_RC (0 = changed and verified, 3 = no patchable port,
 # 4 = nothing to change, 1 = rejected).
 
+# The dispatcher.  Order matters: a volume table is an XML file too, so it would
+# happily fall into the *) policy arm and come back exit 3 ("not an audio policy
+# file") -- which is exactly the misleading SKIPPED line that ended up in real
+# device reports whenever the main policy <xi:include>d its volume tables.
 gen_one() {
   case "$1" in
-    *.so) gen_hal "$@" ;;
-    *)    gen_policy "$@" ;;
+    *.so)                                   gen_hal "$@" ;;
+    *) if is_volume_target "$1"; then
+         gen_volume "$@"
+       else
+         gen_policy "$@"
+       fi ;;
   esac
 }
 
@@ -682,6 +1088,164 @@ gen_policy() {
   return 0
 }
 
+gen_volume() {
+  live="$1"; out="$2"; stk="$3"
+  GEN_RC=1
+
+  if [ -z "$VOLPATCH" ] || [ ! -r "$VOLPATCH" ]; then
+    log "! volume patcher missing ($VOLPATCH)"
+    return 1
+  fi
+  if [ -z "$VOLCHECK" ] || [ ! -r "$VOLCHECK" ]; then
+    log "! volume checker missing ($VOLCHECK)"
+    return 1
+  fi
+
+  # archive the factory table exactly once.  A volume table carries no marker,
+  # so "is this archive poisoned?" cannot be answered by grep: instead the
+  # checker is run with the archive on BOTH sides.  A factory file compared with
+  # itself yields "no points to lift" (exit 4) or a clean pass; an archive that
+  # is already our own output would fail that comparison against a fresh read of
+  # the live file, and we refuse rather than mount something unverifiable.
+  made_archive=0
+  if [ ! -e "$stk" ]; then
+    cp -f "$live" "$stk" 2>/dev/null || { log "! cannot archive $live"; return 1; }
+    chmod 0644 "$stk" 2>/dev/null
+    made_archive=1
+  fi
+
+  awk -v MARKER="$MARKER" -v SPK_POINTS="$VOL_POINTS" -v VER="$MODVER" \
+      -f "$VOLPATCH" "$stk" > "$out.tmp" 2> "$STATE/.vol.err"
+  rc=$?
+  case "$rc" in
+    0) : ;;
+    # 3 = not a volume table after all (a policy file that happened to be named
+    # like one).  Nothing will ever come of it, so drop the archive again.
+    3) rm -f "$out.tmp"
+       [ "$made_archive" = 1 ] && rm -f "$stk"
+       GEN_RC=3; return 3 ;;
+    # 4 = a genuine volume table whose speaker/music tail is already at 0 dB.
+    # This is the idempotent case and ALSO the case of a ROM that never capped
+    # the curve: either way there is nothing to mount and no archive to keep.
+    4) rm -f "$out.tmp" "$out"
+       [ "$made_archive" = 1 ] && rm -f "$stk"
+       GEN_RC=4; return 4 ;;
+    *) log "! volume generator failed on $live: $(cat "$STATE/.vol.err" 2>/dev/null)"
+       rm -f "$out.tmp"
+       [ "$made_archive" = 1 ] && rm -f "$stk"
+       GEN_RC=1; return 1 ;;
+  esac
+
+  # ---- the two invariants, re-checked by the caller and not trusted from awk
+  #
+  # 1. same byte length.  patch_volume.awk already refuses (exit 1) when its own
+  #    output changed length, but the shell repeats the measurement because this
+  #    is the property the bind mount depends on: an audioserver that re-reads a
+  #    file of a different size is reading a file we cannot vouch for.
+  sz_a="$(wc -c < "$stk" | tr -d ' ')"
+  sz_b="$(wc -c < "$out.tmp" | tr -d ' ')"
+  if [ "$sz_a" != "$sz_b" ]; then
+    log "!! REJECTED $live (size changed $sz_a -> $sz_b)"
+    rm -f "$out.tmp"; GEN_RC=1; return 1
+  fi
+
+  # 2. the structural proof: every non-speaker/music curve byte-identical, the
+  #    point count and index sequence unchanged, the tail now exactly 0.
+  volchk="$(awk -v SPK_POINTS="$VOL_POINTS" -f "$VOLCHECK" "$stk" "$out.tmp" 2>&1)"
+  crc=$?
+  if [ "$crc" != 0 ]; then
+    log "!! REJECTED $live (volume curve check failed)"
+    printf '%s\n' "$volchk" | while IFS= read -r l; do [ -n "$l" ] && log "   $l"; done
+    rm -f "$out.tmp"
+    [ "$made_archive" = 1 ] && rm -f "$stk"
+    GEN_RC=1; return 1
+  fi
+
+  mv -f "$out.tmp" "$out" || { GEN_RC=1; return 1; }
+  chmod 0644 "$out" 2>/dev/null
+  chown 0:0 "$out" 2>/dev/null
+  ctx="$(ref_context_for "$live")"
+  [ -n "$ctx" ] && chcon "$ctx" "$out" 2>/dev/null
+
+  GEN_RC=0
+  return 0
+}
+
+# One-line summary of what the volume patch actually changed, for the report:
+# the factory attenuation of each lifted step, in the order the curve uses them.
+# Extracted from the two files rather than recomputed, so the report can never
+# disagree with the artefact that is about to be mounted.
+volume_tail_report() {
+  vstk="$1"; vpat="$2"
+  [ -r "$vstk" ] && [ -r "$vpat" ] || return 0
+  # Two files, two passes.  "file 1 vs file 2" is decided by NR == FNR (ARGIND is
+  # not portable), and the scan is deliberately LINE-oriented: a report line is
+  # worth far less than the mount decision, so this does not need the tokenizer
+  # patch_volume.awk uses -- it only needs to be right on the one-element-per-line
+  # shape every AOSP generator emits, which is also what the fixtures model.
+  awk -v N="$VOL_POINTS" '
+    function attr(atts, name,   re, v) {
+      re = "(^|[ \t\r])" name "[ \t\r]*=[ \t\r]*\"[^\"]*\""
+      if (match(atts, re)) {
+        v = substr(atts, RSTART, RLENGTH)
+        sub(/^[^"]*"/, "", v); sub(/"[ \t\r]*$/, "", v)
+        return v
+      }
+      return ""
+    }
+    function isour(tag, atts) {
+      if (tag == "volume")
+        return (attr(atts, "stream") == "AUDIO_STREAM_MUSIC" && \
+                attr(atts, "deviceCategory") == "DEVICE_CATEGORY_SPEAKER")
+      if (tag == "reference")
+        return (attr(atts, "name") ~ /^DEFAULT_DEVICE_CATEGORY_SPEAKER_VOLUME_CURVE/)
+      return 0
+    }
+    {
+      first = (NR == FNR)
+      line = $0
+
+      # opening tag of a curve, anywhere on the line
+      if (match(line, /<(volume|reference)[ \t\r]/)) {
+        tag  = substr(line, RSTART + 1); sub(/[ \t\r].*$/, "", tag)
+        rest = substr(line, RSTART)
+        gt   = index(rest, ">")
+        if (gt > 0) {
+          atts = substr(rest, length(tag) + 1, gt - length(tag) - 1)
+          inblk = isour(tag, atts)
+          curtag = tag
+          line = substr(rest, gt + 1)
+        }
+      }
+      if (!inblk) next
+
+      # the close tag ends our block
+      if (index(line, "</" curtag) > 0) { inblk = 0 }
+
+      # every <point> that belongs to it
+      while (match(line, /<point[ \t]*>[^<]*<\/point>/)) {
+        seg  = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        sub(/^<point[ \t]*>/, "", seg); sub(/<\/point>$/, "", seg)
+        split(seg, a, ",")
+        idx = a[1] + 0
+        db  = a[2]; gsub(/[ \t\r]/, "", db)
+        if (first) { S[idx] = db; if (idx > mx) mx = idx }
+        else       { P[idx] = db }
+      }
+    }
+    END {
+      if (mx == 0) exit 0   # a return inside END is a syntax error in awk
+      from = mx - N + 1
+      if (from < 1) from = 1
+      for (i = from; i <= mx; i++) {
+        if (!(i in S)) continue
+        out = out (out == "" ? "" : ", ") i ":" S[i] "->" (i in P ? P[i] : "?")
+      }
+      printf "%s", out
+    }' "$vstk" "$vpat" 2>/dev/null
+}
+
 # prepare every patchable policy file; writes $TGT and $REPORT
 prepare() {
   ensure_dirs
@@ -691,15 +1255,43 @@ prepare() {
   refresh_targets
   : > "$TGT.tmp"
   : > "$REPORT.tmp"
-  n_all=0; n_ok=0; n_skip=0; n_pol=0; n_hal=0
+  n_all=0; n_ok=0; n_skip=0; n_pol=0; n_hal=0; n_vol=0; n_vollock=0
+  # volume tables that were REFUSED by the checker (as opposed to skipped).
+  # Reported separately by apply_mount, because a refused loudness layer is the
+  # one failure the user must not have to dig for: the phone stays at the
+  # factory ceiling and nothing in the normal log says so.
+  n_volfail=0
 
   for f in $(candidate_list); do
     n_all=$((n_all + 1))
     flat="$(flatten "$f")"
-    case "$f" in
-      *.so) kind=hal ;;
-      *)    kind=policy ;;
-    esac
+    # Three kinds, and the volume arm MUST be tested before the *) policy arm:
+    # a volume table is an XML file too, and sending it to patch_policy.awk
+    # produces the misleading "not an audio policy file" skip.
+    kind=policy
+    if is_hal_target "$f"; then kind=hal
+    elif is_volume_target "$f"; then kind=volume
+    elif is_volume_engine_target "$f"; then kind=volengine
+    fi
+
+    # The volume layer is the only one gated by a switch, and the gate is THIS
+    # narrow: the table is still reported (that is how a user discovers that
+    # their ROM caps the speaker at -3 dB), it is just never rewritten.
+    if [ "$kind" = volume ] && [ "$VOL_UNLOCK" != 1 ]; then
+      printf 'SKIPPED  %s  (VOL_UNLOCK=0: speaker/music curve left at the factory ceiling)\n' \
+             "$f" >> "$REPORT.tmp"
+      n_vollock=$((n_vollock + 1))
+      n_skip=$((n_skip + 1))
+      continue
+    fi
+    # An engine-level volume table is never ours, whatever VOL_UNLOCK says.
+    if [ "$kind" = volengine ]; then
+      printf 'SKIPPED  %s  (volume table not in the unlock whitelist -- AudioPolicy engine strategy curves are out of scope)\n' \
+             "$f" >> "$REPORT.tmp"
+      n_skip=$((n_skip + 1))
+      continue
+    fi
+
     if gen_one "$f" "$STATE/patched/$flat" "$STATE/stock/$flat"; then
       n_ok=$((n_ok + 1))
       printf '%s|%s|%s\n' "$f" "$STATE/patched/$flat" "$STATE/stock/$flat" >> "$TGT.tmp"
@@ -707,6 +1299,11 @@ prepare() {
         n_hal=$((n_hal + 1))
         printf 'PATCHED  %s\n         HAL sample-rate table unlocked to %s Hz\n' \
                "$f" "$MAX_RATE" >> "$REPORT.tmp"
+      elif [ "$kind" = volume ]; then
+        n_vol=$((n_vol + 1))
+        vtop="$(volume_tail_report "$STATE/stock/$flat" "$STATE/patched/$flat")"
+        printf 'PATCHED  %s\n         speaker/music curve: last %s point(s) lifted to 0 dB (%s)\n' \
+               "$f" "$VOL_POINTS" "${vtop:-?}" >> "$REPORT.tmp"
       else
         n_pol=$((n_pol + 1))
         ports="$(sed -n "s/.*$MARKER | ports=\([^|]*\)|.*/\1/p" "$STATE/patched/$flat" 2>/dev/null | head -n1)"
@@ -714,27 +1311,42 @@ prepare() {
       fi
     else
       rc="${GEN_RC:-1}"
-      if [ "$kind" = hal ]; then
-        case "$rc" in
-          3) printf 'SKIPPED  %s  (this library does not use the AOSP USB HAL rate table)\n' "$f" >> "$REPORT.tmp" ;;
-          4) printf 'SKIPPED  %s  (HAL ceiling already unlocked)\n' "$f" >> "$REPORT.tmp" ;;
-          6) printf 'SKIPPED  %s  (rate table appears twice -- refused)\n' "$f" >> "$REPORT.tmp" ;;
-          *) printf 'FAILED   %s  (HAL patch refused -- see the log above)\n' "$f" >> "$REPORT.tmp" ;;
-        esac
-      else
-        case "$rc" in
-          3) printf 'SKIPPED  %s  (not an audio policy file)\n' "$f" >> "$REPORT.tmp" ;;
-          4) printf 'SKIPPED  %s  (no USB / wired / DIRECT output port WITH a rate profile)\n' "$f" >> "$REPORT.tmp" ;;
-          *) printf 'FAILED   %s  (see the log above)\n' "$f" >> "$REPORT.tmp" ;;
-        esac
-      fi
+      case "$kind" in
+        hal)
+          case "$rc" in
+            3) printf 'SKIPPED  %s  (this library does not use the AOSP USB HAL rate table)\n' "$f" >> "$REPORT.tmp" ;;
+            4) printf 'SKIPPED  %s  (HAL ceiling already unlocked)\n' "$f" >> "$REPORT.tmp" ;;
+            6) printf 'SKIPPED  %s  (rate table appears twice -- refused)\n' "$f" >> "$REPORT.tmp" ;;
+            *) printf 'FAILED   %s  (HAL patch refused -- see the log above)\n' "$f" >> "$REPORT.tmp" ;;
+          esac ;;
+        volume)
+          case "$rc" in
+            3) printf 'SKIPPED  %s  (not a volume table -- no speaker/music curve and no VOLUME_CURVE reference)\n' "$f" >> "$REPORT.tmp" ;;
+            4) printf 'SKIPPED  %s  (speaker/music curve already at full scale -- nothing to lift)\n' "$f" >> "$REPORT.tmp" ;;
+            *) printf 'FAILED   %s  (volume patch REFUSED -- the factory curve stays in use, see the log above)\n' "$f" >> "$REPORT.tmp"
+               n_volfail=$((n_volfail + 1)) ;;
+          esac ;;
+        *)
+          case "$rc" in
+            3) printf 'SKIPPED  %s  (not an audio policy file)\n' "$f" >> "$REPORT.tmp" ;;
+            4) printf 'SKIPPED  %s  (no USB / wired / DIRECT output port WITH a rate profile)\n' "$f" >> "$REPORT.tmp" ;;
+            *) printf 'FAILED   %s  (see the log above)\n' "$f" >> "$REPORT.tmp" ;;
+          esac ;;
+      esac
       n_skip=$((n_skip + 1))
     fi
   done
 
   mv -f "$TGT.tmp" "$TGT" 2>/dev/null
   mv -f "$REPORT.tmp" "$REPORT" 2>/dev/null
-  log "scan: $n_all candidate(s) -> $n_pol policy + $n_hal HAL patched, $n_skip skipped (mixer=$MIXER_RATE ceiling=$MAX_RATE bits=$BIT_DEPTH hifi=$HIFI_RATE hal=$HAL_PATCH)"
+  log "scan: $n_all candidate(s) -> $n_pol policy + $n_hal HAL + $n_vol volume patched, $n_skip skipped (mixer=$MIXER_RATE ceiling=$MAX_RATE bits=$BIT_DEPTH hifi=$HIFI_RATE hal=$HAL_PATCH volunlock=$VOL_UNLOCK)"
+  if [ "$VOL_UNLOCK" != 1 ] && [ "$n_vollock" -gt 0 ]; then
+    log "  note: $n_vollock volume table(s) left at the factory ceiling -- 'hifi set volunlock 1' lifts the top $VOL_POINTS speaker/music steps"
+  fi
+  if [ "$n_volfail" -gt 0 ]; then
+    log "!! $n_volfail volume table(s) were REFUSED by check_volume.awk and are NOT mounted:"
+    log "   the loudspeaker keeps the factory ceiling. Run 'hifi verify' and 'hifi log'."
+  fi
 
   if [ "$n_ok" = 0 ]; then
     log "! nothing patchable was found -- this ROM exposes neither a USB / wired /"
@@ -783,6 +1395,8 @@ apply_mount() {
       n_ok=$((n_ok + 1))
       if is_hal_target "$live"; then
         log "active: $live  (USB HAL ceiling now $(hal_ceiling "$live") Hz)"
+      elif is_volume_target "$live"; then
+        log "active: $live  (speaker/music curve: last $VOL_POINTS step(s) at 0 dB, file length unchanged)"
       else
         log "active: $live"
       fi
@@ -863,6 +1477,27 @@ kill_by_cmdline() {
         ;;
     esac
   done
+}
+
+# =============================================== the ONE restart decision point
+# do_apply and do_restore both ask this, so the suppression rule cannot drift
+# between them again (that drift WAS finding F2: do_set honoured the transient
+# flag, do_restore did not, and the boot self-heal restarted a crash-looping
+# audioserver).  Suppression re-checks the raw environment instead of trusting
+# $RESTART alone, because load_conf is not the only writer of that variable.
+restart_suppressed() {
+  [ "${HIFI_NO_RESTART:-0}" = 1 ] && return 0
+  [ "${HIFI_TRANSIENT:-0}" = 1 ] && return 0
+  [ "${RESTART:-1}" = 1 ] || return 0
+  return 1
+}
+
+maybe_restart_audio() {
+  if restart_suppressed; then
+    log "audio restart SUPPRESSED (${1:-apply}): the stack is left exactly as it is (transient / no-restart path)"
+    return 0
+  fi
+  restart_audio
 }
 
 restart_audio() {
@@ -989,6 +1624,27 @@ count_hal_applied() {
   printf '%s' "$n"
 }
 
+count_volume() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    is_volume_target "$live" && n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
+count_volume_applied() {
+  [ -r "$TGT" ] || { printf '0'; return; }
+  n=0
+  while IFS='|' read -r live rest; do
+    [ -n "$live" ] || continue
+    is_volume_target "$live" || continue
+    is_mounted "$live" && n=$((n + 1))
+  done < "$TGT"
+  printf '%s' "$n"
+}
+
 hal_list() {
   [ -r "$TGT" ] || return 0
   while IFS='|' read -r live rest; do
@@ -1045,41 +1701,53 @@ status_json() {
     dac_name="${dn:-}"; dac_max="${dm:-0}"; dac_formats="${dfm:-}"
   fi
   ver="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
-  tail_txt="$(tail -n 12 "$LOG" 2>/dev/null | json_escape)"
+  # `json_str "$(tail ...)"`, NOT `tail ... | json_str`: json_str takes its
+  # value as ARGUMENT ($1) and would otherwise receive nothing and emit an empty
+  # string.  Running json_escape on the pipe was the last path that bypassed the
+  # funnel, so a tab in a log line invalidated the whole answer.
+  tail_txt="$(json_str "$(tail -n 12 "$LOG" 2>/dev/null)")"
   old_mod=0
   [ -d "/data/adb/modules/$OLD_ID" ] && old_mod=1
+  # the ROM's own policy dialect, read-only.  Reported so the WebUI can state
+  # which dialect the device speaks without asking for files: it also tells the
+  # user WHY a file was skipped (a HIDL/HAL-only ROM has no AIDL policy).
+  dialect="$(current_dialect)"
 
   printf '{\n'
-  printf '  "version": "%s",\n' "${ver:-?}"
+  printf '  "version": "%s",\n' "$(json_str "${ver:-?}")"
   printf '  "enabled": %s,\n' "$ENABLED"
   printf '  "applied": %s,\n' "$applied"
   printf '  "applied_files": %s,\n' "${n_ok:-0}"
   printf '  "total_files": %s,\n' "${n_all:-0}"
   printf '  "hal_files": %s,\n' "$(count_hal)"
   printf '  "hal_applied": %s,\n' "$(count_hal_applied)"
+  printf '  "volume_files": %s,\n' "$(count_volume)"
+  printf '  "volume_applied": %s,\n' "$(count_volume_applied)"
+  printf '  "vol_unlock": %s,\n' "$VOL_UNLOCK"
   printf '  "hal_enabled": %s,\n' "$HAL_PATCH"
   printf '  "backup": %s,\n' "$backup"
   printf '  "mixer_rate": %s,\n' "$MIXER_RATE"
-  printf '  "hifi_rate": "%s",\n' "$HIFI_RATE"
+  printf '  "hifi_rate": "%s",\n' "$(json_str "$HIFI_RATE")"
   printf '  "max_rate": %s,\n' "$MAX_RATE"
   printf '  "bit_depth": %s,\n' "$BIT_DEPTH"
-  printf '  "spk_rate": "%s",\n' "$SPK_RATE"
+  printf '  "spk_rate": "%s",\n' "$(json_str "$SPK_RATE")"
   printf '  "spk_bits": %s,\n' "$SPK_BITS"
   printf '  "spk_dsp_bits": %s,\n' "$SPK_DSP_BITS"
   # smart PA knobs are reported from the CONFIG, never from tinymix: the WebUI
   # must not depend on root-only mixer control reads
   printf '  "pa_gain": %s,\n' "$(pa_conf_json_num "$PA_GAIN")"
   printf '  "pa_boost": %s,\n' "$(pa_conf_json_num "$PA_BOOST")"
-  printf '  "bit_profiles": "%s",\n' "$(bitdepth_profiles "$BIT_DEPTH")"
+  printf '  "bit_profiles": "%s",\n' "$(json_str "$(bitdepth_profiles "$BIT_DEPTH")")"
   printf '  "restart": %s,\n' "$RESTART"
   printf '  "rates": [%s],\n' "$(printf '%s' "$ALL_RATES" | tr ' ' ',')"
-  printf '  "target": "%s",\n' "$(targets_brief)"
-  printf '  "dac_name": "%s",\n' "$dac_name"
-  printf '  "dac_formats": "%s",\n' "$dac_formats"
+  printf '  "target": "%s",\n' "$(json_str "$(targets_brief)")"
+  printf '  "dac_name": "%s",\n' "$(json_str "$dac_name")"
+  printf '  "dac_formats": "%s",\n' "$(json_str "$dac_formats")"
   printf '  "dac_max": %s,\n' "${dac_max:-0}"
-  printf '  "audioserver": "%s",\n' "$(getprop init.svc.audioserver)"
-  printf '  "sdk": "%s",\n' "$(getprop ro.build.version.sdk)"
-  printf '  "device": "%s",\n' "$(getprop ro.product.device)"
+  printf '  "audioserver": "%s",\n' "$(json_str "$(getprop init.svc.audioserver)")"
+  printf '  "sdk": "%s",\n' "$(json_str "$(getprop ro.build.version.sdk)")"
+  printf '  "dialect": "%s",\n' "$(json_str "${dialect:-unknown}")"
+  printf '  "device": "%s",\n' "$(json_str "$(getprop ro.product.device)")"
   printf '  "old_module": %s,\n' "$old_mod"
   printf '  "log_tail": "%s"\n' "$tail_txt"
   printf '}\n'
@@ -1119,6 +1787,9 @@ do_status() {
   else
     hal_txt="inactive ($(count_hal) library/ies still at the factory ceiling)"
   fi
+  # the ROM's own policy dialect -- read-only, so `status` can say WHICH kind of
+  # file the module is dealing with (and explain a HIDL ROM with no AIDL policy)
+  DIALECT="$(current_dialect)"
   cat <<EOF
 HiFi SRC Bypass  (universal USB / wired SRC bypass)
   module version : ${ver:-?}
@@ -1126,6 +1797,7 @@ HiFi SRC Bypass  (universal USB / wired SRC bypass)
   enabled        : $([ "$ENABLED" = 1 ] && echo yes || echo no)
   policy mount   : $mnt
   HAL layer      : $hal_txt
+  policy dialect : ${DIALECT:-unknown}$([ "$DIALECT" = qti ] && echo " (Qualcomm AIDL)" || true)$([ "$DIALECT" = aosp ] && echo " (AOSP / HIDL)" || true)
   factory backup : $([ -d "$STATE/stock" ] && ls -1 "$STATE/stock" 2>/dev/null | wc -l | tr -d ' ') archived file(s)
   mixer rate     : $MIXER_RATE Hz $([ "$MIXER_RATE" = 48000 ] && echo "(factory-typical)")$([ "$MIXER_RATE" = 44100 ] && echo "(44.1k library aligned)")$([ "$MIXER_RATE" = 192000 ] && echo "(high-rate mixer)")$([ "$MIXER_RATE" = 384000 ] && echo "(max-rate mixer)")
   hifi port rate : $HIFI_RATE$([ "$HIFI_RATE" = auto ] && echo " (stock: follows the DAC maximum)")$([ "$HIFI_RATE" != auto ] && echo " Hz (pinned: $HIFI_RATE content plays without resampling, the rest is resampled UP)")
@@ -1133,6 +1805,7 @@ HiFi SRC Bypass  (universal USB / wired SRC bypass)
   bit depth      : ${BIT_DEPTH}bit -> $(bitdepth_profiles "$BIT_DEPTH")
   speaker rate   : $SPK_RATE$([ "$SPK_RATE" = auto ] && echo " (factory)")$([ "$SPK_RATE" != auto ] && echo " Hz (pinned)")
   speaker bits   : ${SPK_BITS}bit$([ "$SPK_BITS" = 16 ] && echo " (factory)" || echo " -> speaker/earpiece ports extended to ${SPK_BITS}bit")
+  speaker loud   : $SPK_LOUD$(_loud_txt)
   ceilings avail : $ALL_RATES
   bitdepth avail : $ALL_BITS
   dsp enforce    : $SPK_DSP_BITS$([ "$SPK_DSP_BITS" = 16 ] && echo " (off: no property injected)" || echo " -> persist.vendor.audio_hal.dsp_bit_width_enforce_mode=$SPK_DSP_BITS on apply")
@@ -1293,6 +1966,10 @@ do_ports() {
           printf '  %s\n      (USB HAL library -- sample-rate table, not XML ports)\n' "$live"
           continue ;;
       esac
+      if is_volume_target "$live"; then
+        printf '  %s\n      (volume table -- speaker/music curve, not a port list)\n' "$live"
+        continue
+      fi
       printf '  %s\n' "$live"
       sed -n "s/.*$MARKER | ports=\([^|]*\)|.*/    \1/p" "$patched" 2>/dev/null \
         | tr ',' '\n' | sed 's/^/      /'
@@ -1308,11 +1985,15 @@ do_files() {
   while IFS='|' read -r live patched stk; do
     [ -n "$live" ] || continue
     if target_applied "$live"; then s=mounted; else s=factory; fi
-    if is_hal_target "$live"; then k=HAL; else k=policy; fi
+    if is_hal_target "$live"; then k=HAL
+    elif is_volume_target "$live"; then k=volume
+    else k=policy
+    fi
     printf '%-10s %-7s %-44s %s\n' "$s" "$k" "$live" "$patched"
   done < "$TGT"
-  printf '\n  policy : %s file(s)   HAL : %s library/ies\n' \
-         "$(( $(count_targets) - n_hal ))" "$n_hal"
+  n_vol="$(count_volume)"
+  printf '\n  policy : %s file(s)   HAL : %s library/ies   volume : %s table(s)\n' \
+         "$(( $(count_targets) - n_hal - n_vol ))" "$n_hal" "$n_vol"
   printf '\narchives:\n'
   ls -l "$STATE/stock" 2>/dev/null | sed 's/^/  /'
 }
@@ -1357,6 +2038,14 @@ do_boot() {
 do_apply() {
   enter_global_ns apply
   load_conf
+  # P0-5: the boot self-heal may re-apply while the audio stack is crash-looping,
+  # so it passes --no-restart / HIFI_NO_RESTART=1 / HIFI_TRANSIENT=1.  load_conf
+  # folds all three into $RESTART, but the argument form is checked here as well
+  # so `hifi apply --no-restart` works as a standalone command line too.
+  case "${1:-}" in
+    --no-restart|0) RESTART=0 ;;
+    1)              RESTART=1 ;;
+  esac
   # `apply` is an explicit "turn it on": clear a previous restore and persist
   # it, otherwise a one-tap restore would silently swallow every later apply.
   if [ "$ENABLED" != 1 ]; then
@@ -1389,11 +2078,8 @@ do_apply() {
       *) log "boot-failure history cleared (previous count=$bf_prev)" ;;
     esac
   fi
-  if [ "$RESTART" = 1 ]; then
-    restart_audio
-  else
-    log "audio restart skipped, takes effect after reboot"
-  fi
+  # one decision point, shared with do_restore (see restart_suppressed)
+  maybe_restart_audio apply
   # refresh the snapshot: otherwise it still describes the *previous* boot,
   # which is exactly the wrong thing to hand to whoever is debugging
   # WP1: force the ADSP bit width when the user asked for it.  Pure property
@@ -1419,6 +2105,13 @@ do_apply() {
 do_restore() {
   enter_global_ns restore
   load_conf
+  # P0-4 calls this as `restore --no-restart` while audioserver is crash-looping
+  # (service.sh).  The argument is honoured on top of HIFI_NO_RESTART /
+  # HIFI_TRANSIENT, which load_conf already folded into $RESTART.
+  case "${1:-}" in
+    --no-restart|0) RESTART=0 ;;
+    1)              RESTART=1 ;;
+  esac
   log "=== one-tap restore: going back to the factory audio policy ==="
   undo_mount || true
   ENABLED=0
@@ -1450,19 +2143,36 @@ do_restore() {
     setprop persist.vendor.audio_hal.dsp_bit_width_enforce_mode "" \
       && log "dsp_bit_width_enforce_mode cleared (factory ADSP bit width restored)"
   fi
+  # ---- speaker loudest-mode codec layer ------------------------------------
+  # `hifi restore` must leave ZERO module state behind, and SPK_LOUD is state
+  # that lives in the CODEC, not in a file: leaving IIR0 filtering at 160 Hz
+  # after a restore would mean the phone keeps a handset-specific EQ nobody
+  # asked for any more.  Unconditional (whatever SPK_LOUD says now): an older
+  # config or a crashed run may have written the coefficients without the
+  # value surviving.  Restore is a read-modify-write of controls that already
+  # exist -- no audio service needed, so it is safe on a crash-looping stack.
+  iir_restore_hp || true
+  spk_digital_restore
   log "factory policy is in use again; the module stays installed but inert"
   log "re-enable with: hifi apply   (or the WebUI button)"
-  if [ "$RESTART" = 1 ]; then
-    restart_audio
-  else
-    log "audio restart skipped, takes effect after reboot"
-  fi
+  # F2: this is the call the P0-4 emergency exit makes on a crash-looping
+  # audioserver, so it must go through the same suppression gate as do_apply.
+  maybe_restart_audio restore
   do_report >/dev/null 2>&1
   return 0
 }
 
 do_set() {
   key="${1:-}"; val="${2:-}"
+  # HIFI_TRANSIENT=1 : change the value FOR THIS RUN ONLY and do not rewrite
+  # config.conf.  service.sh's boot self-heal needs exactly this -- it has to
+  # apply/restore with the audio restart suppressed (the stack may be
+  # crash-looping), but it must not silently persist that decision: the user's
+  # own RESTART=1 would be permanently downgraded to 0 with no recovery point.
+  # Without this flag the old comment "zero it for this run without saving" was
+  # simply false -- do_set's restart branch fell straight through to save_conf.
+  transient=0
+  [ "${HIFI_TRANSIENT:-0}" = 1 ] && transient=1
   case "$key" in
     mixer|mixer_rate)
       ok=0
@@ -1499,17 +2209,35 @@ do_set() {
       for b in $ALL_SPKDSP; do [ "$b" = "$val" ] && ok=1; done
       [ "$ok" = 1 ] || { echo "spkdsp must be one of: $ALL_SPKDSP"; return 1; }
       SPK_DSP_BITS="$val" ;;
+    speloud|speakerloud|spk_loud)
+      # Speaker loudness mode.  Numeric only (0/1/2) -- the words on/off are
+      # deliberately NOT accepted: "1" and "2" mean different amounts of
+      # intervention, so an alias that silently picks one of them would be a
+      # coin flip on the user's loudspeaker.
+      case "$val" in
+        0|1|2) SPK_LOUD="$val" ;;
+        *) echo "speloud must be one of: 0 1 2   (0 = off, 1 = IIR high-pass only, 2 = + digital volume down to 72)"; return 1 ;;
+      esac ;;
     enabled|enable)
       case "$val" in 1|on|true) ENABLED=1 ;; 0|off|false) ENABLED=0 ;;
         *) echo "enabled must be 0 or 1"; return 1 ;; esac ;;
     restart)
       case "$val" in 1|0) RESTART="$val" ;;
-        *) echo "restart must be 0 or 1"; return 1 ;; esac ;;
+        *) echo "restart must be 0 or 1"; return 1 ;; esac
+      # an explicit `set restart` IS a user decision, so it becomes the value
+      # that gets persisted (unless this call is the transient self-heal)
+      [ "$transient" = 1 ] || RESTART_PERSIST="$RESTART" ;;
     hal|hal_patch)
       case "$val" in
         1|on|true)   HAL_PATCH=1 ;;
         0|off|false) HAL_PATCH=0 ;;
         *) echo "hal must be 0 or 1"; return 1 ;;
+      esac ;;
+    volunlock|vol_unlock|volume)
+      case "$val" in
+        1|on|true)   VOL_UNLOCK=1 ;;
+        0|off|false) VOL_UNLOCK=0 ;;
+        *) echo "volunlock must be 0 or 1"; return 1 ;;
       esac ;;
     *) echo "unknown key: $key"; return 1 ;;
   esac
@@ -1517,8 +2245,17 @@ do_set() {
   # Only the candidate cache is dropped -- targets.lst is left alone, because
   # `hifi restore` still needs it to unmount the currently active targets.
   case "$key" in
-    hal|hal_patch) rm -f "$CACHE" 2>/dev/null ;;
+    # turning a layer on/off changes which files are candidates AND which of
+    # them are patched; the cache is recomputed so a stale entry can never keep
+    # a volume table out of (or inside) the list
+    hal|hal_patch|volunlock|vol_unlock|volume) rm -f "$CACHE" 2>/dev/null ;;
   esac
+  if [ "$transient" = 1 ]; then
+    # the value is live for this process only; config.conf keeps the user's
+    # own setting, so the next boot starts from what the user chose
+    printf '%s = %s (transient: config.conf left untouched)\n' "$key" "$val"
+    return 0
+  fi
   save_conf
   printf '%s = %s\n' "$key" "$val"
   case "$key" in
@@ -1528,6 +2265,18 @@ do_set() {
       printf 'run: hifi apply\n' ;;
     spkdsp|spk_dsp_bits)
       printf 'run: hifi apply   (16 = off: nothing is injected, an old value is cleared by hifi restore)\n' ;;
+    volunlock|vol_unlock|volume)
+      printf 'run: hifi apply   (1 = the last %s speaker/music volume steps go to 0 dB; 0 = factory curve)\n' "$VOL_POINTS" ;;
+    speloud|speakerloud|spk_loud)
+      # Deliberately NOT "run: hifi apply": every other key here changes files
+      # the apply step mounts, this one drives runtime codec controls that
+      # `hifi speaker loud` writes directly.  Pointing at the wrong verb would
+      # leave the user with a persisted 1 and an untouched codec.
+      case "$SPK_LOUD" in
+        0) printf 'run: hifi speaker auto   (0 = 不碰：IIR 高通与数字音量都还原出厂)\n' ;;
+        *) printf 'run: hifi speaker loud   (立即写入；%s)\n' \
+             "$([ "$SPK_LOUD" = 2 ] && echo '1 = 只做 IIR 高通, 2 = 额外允许数字音量压到 72' || echo '1 = 只做 IIR 高通')" ;;
+      esac ;;
   esac
   return 0
 }
@@ -1590,11 +2339,432 @@ do_preset() {
   do_apply
 }
 
-# ================================================================== speaker
-# 一键扬声器最佳实践。DSP 算法（杜比 / Dirac / DTS）受商业 license + 系统
-# 签名锁死，模块做不了；这里做的是链路纯净：把扬声器/听筒端口钉到与曲库
-# 一致的采样率 + 补齐位深，消除扬声器路径上的重采样。MIXER_RATE 一律不动，
-# 它属于 do_preset / `hifi set mixer` 的职责范围。
+# ============================================== speaker: hardware IIR high-pass
+# 为什么要高通，而不是继续推功放增益
+# ---------------------------------------------------------------------------
+# 真机声学实测（原厂 0dB 档 vs 模块 +6dB 档，两条录音全采样分析）：
+#   RMS 差 -0.41 dB、1000 Hz 基波差 -0.37 dB、峰值差 -0.45 dB —— 同一输出。
+# 原因在硬件固件里：TFA9874 的 G_DEFAULT 本身就等于满载 G_6_DB，推功放增益
+# 是零收益。真正吃掉响度的是振膜行程：小型扬声器发不出 100~200 Hz 以下的
+# 超低频，那些频率只会把振膜推到底，触发 TFA 的 DSP 限幅器，连带把中高频
+# 一起压下去。所以正确的做法是「砍掉发不出来的部分」，把行程留给能发声的
+# 频段，中高频因此可以更响 —— 且不增加任何硬件功率风险。
+#
+# Qualcomm 硬件 IIR：5 个双二阶带（IIR0 Band1..5），每带 5 个系数
+#   b0 b1 b2 a1 a2      (a0 归一化为 1)
+# Q30 有符号定点（1.0 == 2^30）。系数按 RBJ cookbook 的 HPF（Q=0.7071，
+# 即 Butterworth 二阶）在**运行时按实际 FS 现场计算**，verification 用一个
+# 已知采样率的内置表逐位自校验 —— 算错就一个字都不写。
+IIR_HP_F=160                      # 截止频率 (Hz)：低于小型扬声器有效下限
+IIR_HP_Q=0.7071067811865476       # Butterworth (Q = sqrt(1/2))
+IIR_BAND=1                        # 用 Band1；Band2..5 保持出厂 0（旁路）
+IIR_FS_DEFAULT=48000              # 取不到真实播放率时的回退（模块的出厂混音率）
+# 内置校验表：这两个值是设计院算好的基准，awk 现场算必须逐位相等。
+IIR_REF_48K="1057957290 -2115914580 1057957290 -2115682527 1042404809"
+IIR_REF_44K1="1056572595 -2113145190 1056572595 -2112870635 1039677921"
+
+# awk 的系数计算+自校验，全模块只有这一份。输出两种形态：
+#   成功 : "<b0> <b1> <b2> <a1> <a2>"
+#   失败 : "FAIL:<原因>"   (调用方据此跳过，绝不写半套系数)
+#
+# 为什么连稳定性一起查：写一半的系数（b 换了 a 没换）会让极点跑出单位圆，
+# 那是自激 —— 比不写糟得多。所以这里同时验极点模长与三个频点的幅频响应。
+IIR_AWK='
+function rnd(x) { return x < 0 ? int(x - 0.5) : int(x + 0.5) }
+function mag(f,  B0,B1,B2,A1,A2,qq,w,nr,ni,dr,di) {
+  B0=C0; B1=C1; B2=C2; A1=D1; A2=D2; qq=q
+  w = 2*pi*f/fs
+  nr = B0 + B1*cos(w) + B2*cos(2*w); ni = -(B1*sin(w) + B2*sin(2*w))
+  dr = qq + A1*cos(w) + A2*cos(2*w); di = -(A1*sin(w) + A2*sin(2*w))
+  return sqrt(nr*nr+ni*ni)/sqrt(dr*dr+di*di)
+}
+BEGIN {
+  fc = FC; Q = QQ; pi = atan2(0, -1); q = 2^30
+  if (fs < 8000) { print "FAIL:采样率 " fs " 过低"; exit 1 }
+  w0 = 2*pi*fc/fs; cw = cos(w0); sw = sin(w0)
+  al = sw/(2*Q); a0 = 1 + al
+  C0 = rnd((1+cw)/2/a0*q); C1 = rnd(-(1+cw)/a0*q); C2 = C0
+  D1 = rnd(-2*cw/a0*q);    D2 = rnd((1-al)/a0*q)
+  a1 = -2*cw/a0; a2 = (1-al)/a0
+  # 极点在单位圆内：|a2| < 1 且 |a1| < 1 + a2（二阶实系数稳定判据）
+  if (a2 >= 1 || a2 <= -1) { print "FAIL:极点越界 a2=" a2; exit 1 }
+  if (a1 >= 1+a2 || a1 <= -(1+a2)) { print "FAIL:极点越界 a1=" a1; exit 1 }
+  m_c = mag(fc); m_1k = mag(1000); m_50 = mag(50)
+  if (m_c < 0.69 || m_c > 0.72) { printf "FAIL:fc 增益 %.5f\n", m_c; exit 1 }
+  if (m_1k < 0.99)              { printf "FAIL:1k 增益 %.5f\n", m_1k; exit 1 }
+  if (m_50 > 0.15)              { printf "FAIL:50 增益 %.5f\n", m_50; exit 1 }
+  print C0, C1, C2, D1, D2
+}'
+
+# 真实播放采样率。优先级（先准后稳）：
+#   1. 该 PCM 设备的 hw_params —— 实际正在跑的时钟，最准；
+#   2. SPK_RATE（用户钉住的扬声器端口率）；
+#   3. MIXER_RATE —— 模块自己的出厂混音率。
+# 三个都读不到才回退 IIR_FS_DEFAULT，并把来源写进输出，用户看得到依据。
+# 为什么不直接写死 48k：44.1k 库把混音率钉到 44100 是模块的官方用法，
+# 那时按 48k 算出来的高通会整体偏移到 174 Hz（多砍 14 Hz 的真实低频）。
+iir_fs_of() {
+  _hw="$ASOUND/card0/pcm0p/sub0/hw_params"
+  if [ -r "$_hw" ]; then
+    _r="$(sed -n 's/^ *rate: *//p' "$_hw" 2>/dev/null | head -n1 | tr -dc '0-9')"
+    [ -n "$_r" ] && { printf '%s %s' "$_r" "hw_params"; return 0; }
+  fi
+  case "$SPK_RATE" in
+    [0-9]*) printf '%s %s' "$SPK_RATE" "SPK_RATE"; return 0 ;;
+  esac
+  case "$MIXER_RATE" in
+    [0-9]*) printf '%s %s' "$MIXER_RATE" "MIXER_RATE"; return 0 ;;
+  esac
+  printf '%s %s' "$IIR_FS_DEFAULT" "default"
+}
+
+# 把 FS 换成 5 个 Q30 系数；失败返回 "FAIL:<原因>"。
+# 用法： iir_coeffs_for_fs <fs>
+iir_coeffs_for_fs() {
+  case "${1:-}" in
+    ''|*[!0-9]*) printf 'FAIL:非数字采样率 [%s]' "${1:-}"; return 1 ;;
+  esac
+  # shellcheck disable=SC2086
+  awk -v fs="$1" -v FC="$IIR_HP_F" -v QQ="$IIR_HP_Q" "$IIR_AWK"
+  return 0
+}
+
+# 已知采样率的逐位自校验。算出来跟基准表不一致 = awk 的 cos/sin 精度不够
+# （busybox awk / 某些 mksh 环境的 atof 会掉精度），此时宁可不做。
+# 用法： iir_selftest  -> 打印 FAIL 行并 rc=1，或全通过 rc=0
+iir_selftest() {
+  _st_fail=""
+  for _pair in "48000:$IIR_REF_48K" "44100:$IIR_REF_44K1"; do
+    _fs="${_pair%%:*}"; _want="${_pair#*:}"
+    _got="$(iir_coeffs_for_fs "$_fs")"
+    [ "$_got" = "$_want" ] || _st_fail="$_st_fail ${_fs}Hz"
+  done
+  if [ -n "$_st_fail" ]; then
+    printf 'FAIL:系数自校验不通过（%s）—— 本机 awk 精度不足\n' "${_st_fail# }"
+    return 1
+  fi
+  return 0
+}
+
+# 按名字从 tinymix 全量转储里查 numid。返回空 = 控件不存在。
+# 为什么必须查 numid 而不能把名字传给 tinymix：老 tinymix 与模块自带的
+# payload/tinyalsa_min.c 都用 strtoul/strtoul(argv[1], 0, 10) 解析第一个参数，
+# 字符串名会被解析成 0 —— 而 0 号控件是 "Voice Rx Device Mute"，每次调用都
+# 在误写语音通路，且 tinymix 返回 0（"写成功"），错误被完全吞掉。
+pa_numid_of() {
+  _pa_dump_norm | awk -F'\t' -v want="$1" '
+    $2 == want { print $1; exit }
+    # 多值 INT 控件（IIR0 Band1, count=5）归一化后名字尾部还粘着前面几个
+    # 值：normaliser 的"取最后一个空白 token 当值"规则是为单值控件写的。
+    # 名字前缀完整就够了，所以这里接受 "<want><空白>" 开头的行。
+    index($2, want) == 1 {
+      r = substr($2, length(want) + 1)
+      if (r ~ /^[ \t]/) { print $1; exit }
+    }'
+}
+
+# 多值 INT 控件的**整串**读回（pa_get 只留最后一个 token，count>1 时会丢值）。
+# 用法： pa_get_multi <numid> <控件名>   ->  "v1 v2 v3 v4 v5"（空格分隔）
+#
+# 为什么不能复用 pa_get：它按 "取最后一个空白 token" 的规则为单值控件设计，
+# 对 IIR0 Band1（count=5）只会返回第 5 个系数 —— 拿它做写入校验等于永远
+# 只比最后一个数，前面写错也发现不了。
+# 这里改成"先从行里剥掉控件名，再取开头连续的整数 token"，两种方言都成立：
+#   vendor : 102\tINT\t5\tIIR0 Band1<pad>0 0 0 0 0
+#   legacy : 102\tIIR0 Band1\t0 0 0 0 0
+pa_get_multi() {
+  _gm_num="$1"; _gm_name="$2"
+  _gm_line="$($TMIX "$_gm_num" 2>/dev/null | tr -d '\r' | head -n1)"
+  # 优先在行里定位控件名，把它前面的一切（numid / TYPE / count）剥掉。
+  # 找不到名字时退化为"按 tab 剥字段"，再不行就整行交给 awk 取首个整数段。
+  case "$_gm_line" in
+    *"$_gm_name"*) _gm_rest="${_gm_line#*"$_gm_name"}" ;;
+    *)             _gm_rest="$($TMIX "$_gm_num" 2>/dev/null | tr -d '\r' \
+                       | awk -F'\t' '{ if (NF >= 4) print $4; else print $3 }')" ;;
+  esac
+  printf '%s' "$_gm_rest" | tr '\t' ' ' \
+    | awk '{ s=""; n=0; for (i=1;i<=NF;i++) { if ($i ~ /^-?[0-9]+$/) { s = s (n ? " " : "") $i; n++ } else break } print s }'
+}
+
+# 多值 INT 控件（IIR0 Band1 是 count=5）的真实写入。
+#
+# 关键事实：模块自带的 payload/tinyalsa_min.c（旧版）对 INTEGER 类型用的是
+#   for (k = 0; k < i.count; k++) v.value.integer.value[k] = atoi(val);
+# 也就是把同一个 atoi(argv[2]) 复制满 5 个 slot —— "a b c d e" 会被 atoi 截成
+# a，5 个系数全写成 b0。所以写完必须回读 5 个值逐个比对，对不上就判定"本机
+# 不支持多值写"，把控件恢复成写入前的样子并跳过，绝不留下半套系数。
+#
+# 用法： pa_set_multi <numid> <控件名> <v1> <v2> <v3> <v4> <v5>
+#   rc=0 已写入且回读一致；rc=1 拒绝/失败，控件已尽量回滚
+pa_set_multi() {
+  _pm_ctl="$1"; _pm_nm="$2"; shift 2
+  _pm_want="$*"
+  _pm_before="$(pa_get_multi "$_pm_ctl" "$_pm_nm")"
+  _pm_wn=0; for _pm_t in $_pm_want; do _pm_wn=$((_pm_wn + 1)); done
+  if ! $TMIX "$_pm_ctl" $_pm_want >/dev/null 2>&1; then
+    printf '!! 控件 %s 写入命令失败（tinymix 拒绝多值写入）\n' "$_pm_ctl" >&2
+    return 1
+  fi
+  _pm_back="$(pa_get_multi "$_pm_ctl" "$_pm_nm")"
+  if [ "$_pm_back" = "$_pm_want" ]; then
+    return 0
+  fi
+  printf '!! 控件 %s 回读不符：写入 [%s]，读回 [%s]（本机 tinymix 可能把多值写成了同一个数）\n' \
+         "$_pm_ctl" "$_pm_want" "$_pm_back" >&2
+  # 回滚：把读到的写入前值写回去。写不回去也要报告 —— 半套系数是自激风险。
+  _pm_bn=0; for _pm_t in $_pm_before; do _pm_bn=$((_pm_bn + 1)); done
+  if [ "$_pm_bn" -eq "$_pm_wn" ] && [ -n "$_pm_before" ]; then
+    if $TMIX "$_pm_ctl" $_pm_before >/dev/null 2>&1; then
+      _pm_rb="$(pa_get_multi "$_pm_ctl" "$_pm_nm")"
+      [ "$_pm_rb" = "$_pm_before" ] || printf '!! 控件 %s 回滚后仍不一致：现在 [%s]\n' "$_pm_ctl" "$_pm_rb" >&2
+    else
+      printf '!! 控件 %s 回滚写入失败，请执行 hifi speaker auto 或重启设备\n' "$_pm_ctl" >&2
+      return 1
+    fi
+  else
+    # 写前读不全（控件本来就不一致）—— 退化为清零，绝不留下未知组合
+    printf '!! 控件 %s 写前状态不可信，退化为清零\n' "$_pm_ctl" >&2
+    _pm_zero=""; _pm_k=0
+    while [ "$_pm_k" -lt "$_pm_wn" ]; do
+      _pm_zero="$_pm_zero 0"; _pm_k=$((_pm_k + 1))
+    done
+    $TMIX "$_pm_ctl" $_pm_zero >/dev/null 2>&1 \
+      || printf '!! 控件 %s 清零也失败了，请重启设备\n' "$_pm_ctl" >&2
+  fi
+  return 1
+}
+
+# 写一个 BOOL 控件（On/Off 与 1/0 两种方言都试）。走 pa_set，回读严格比对。
+iir_set_bool() {
+  _ib_ctl="$1"; _ib_on="$2"
+  if pa_set "$_ib_ctl" "$_ib_on"; then
+    return 0
+  fi
+  case "$_ib_on" in
+    1) pa_set "$_ib_ctl" "on" ;;
+    0) pa_set "$_ib_ctl" "off" ;;
+    *) return 1 ;;
+  esac
+}
+
+# 硬件 IIR 高通的可用性探测。全部只读，不写任何控件。
+# 输出一行可读的结论 + 供调用方判断的变量 IIR_OK / IIR_SKIP_REASON。
+#
+# 为什么必须先验路由：IIR0 INP0..INP3 MUX 是 IIR 块的输入选择器，出厂值全
+# 是 ZERO（没有任何通路）。此时写系数是安全的（不连通就不参与运算），但也
+# 完全无效 —— 更要命的是"以为自己做了处理"这种错觉会让用户拿它跟别的调节
+# 手段叠加。所以只在**确实存在可用非 ZERO 播放源时才写**，否则明说跳过原因。
+iir_probe() {
+  IIR_OK=0; IIR_SKIP_REASON=""
+  # 1) 控件是否齐全（BOOL 使能 + INT 5 系数）。这是 IIR 块的物理存在性。
+  IIR_NUM_EN="$(pa_numid_of "IIR0 Enable Band$IIR_BAND")"
+  IIR_NUM_BAND="$(pa_numid_of "IIR0 Band$IIR_BAND")"
+  if [ -z "$IIR_NUM_EN" ] || [ -z "$IIR_NUM_BAND" ]; then
+    IIR_SKIP_REASON="本机 tinymix 里没有 IIR0 Enable Band$IIR_BAND / IIR0 Band$IIR_BAND 控件（非 Qualcomm IIR 架构）"
+    return 1
+  fi
+  # 2) 写系数前该带的现状（还原/回滚时对照用）
+  IIR_PREV_EN="$(pa_get "$IIR_NUM_EN" | tr -d '\r')"
+  IIR_PREV_BAND="$(pa_get_multi "$IIR_NUM_BAND" "IIR0 Band$IIR_BAND")"
+  # 3) 路由可用性：IIR0 INP0..INP3 MUX 的当前选中项 + 可用枚举列表。
+  #
+  # 为什么要单独列枚举：tinymix 单控件读会把整张枚举表一起回显，那正是判断
+  # "本机到底有没有可接的播放源"的依据。当前选中项只要不是 ZERO/OFF，就说明
+  # IIR 块已经接在某条通路上（出厂默认 ZERO = 未连通 = 写了也白写）。
+  #
+  # 注意 vendor 4 字段方言（一加13 真机）的单控件读形如
+  #   "238\tENUM\t1\tIIR0 INP1 MUX  ZERO ...枚举表..."
+  # 枚举表在尾部，所以这里只用 pa_get 取**当前值**，枚举表单独抽出来给人看。
+  IIR_MUX_USABLE=""
+  IIR_MUX_NAMES=""
+  IIR_MUX_ALL_ZERO=1
+  for _im in "IIR0 INP0 MUX" "IIR0 INP1 MUX" "IIR0 INP2 MUX" "IIR0 INP3 MUX"; do
+    _in="$(pa_numid_of "$_im")"
+    [ -n "$_in" ] || continue
+    # 枚举全表：把控件名那一段剥掉，剩下的全大写 token 就是枚举项
+    _names="$($TMIX "$_in" 2>/dev/null | tr -d '\r' \
+              | tr '\t' '\n' | tr ' ' '\n' \
+              | grep -E '^[A-Z][A-Z0-9_]{2,}$' \
+              | grep -vE '^(MUX|IIR0|IIR1|INP[0-9]|ENUM|ZERO)$' \
+              | sort -u | tr '\n' ' ')"
+    IIR_MUX_NAMES="$IIR_MUX_NAMES $_names"
+    _cur="$(pa_get "$_in" | tr -d '\r')"
+    case "$_cur" in
+      ''|ZERO|OFF|Off|off) continue ;;
+    esac
+    IIR_MUX_ALL_ZERO=0
+    [ -n "$IIR_MUX_USABLE" ] || IIR_MUX_USABLE="$_im=$_cur"
+  done
+  # 有没有可接的播放源枚举项？（ZERO 之外是否存在 RX / PCM / AIF 类源）
+  IIR_MUX_HAS_SRC=0
+  for _mt in $IIR_MUX_NAMES; do
+    case "$_mt" in
+      *RX*|PCM*|AIF*|*_RX*) IIR_MUX_HAS_SRC=1; break ;;
+    esac
+  done
+  IIR_MUX_NAMES="$(printf '%s\n' $IIR_MUX_NAMES | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$IIR_MUX_ALL_ZERO" != 0 ] || [ -z "$IIR_MUX_USABLE" ]; then
+    # 没连通 = 写系数完全无效（而且会让用户以为已经处理过）。明确跳过。
+    IIR_SKIP_REASON="IIR0 INP0..INP3 MUX 全部为 ZERO（出厂未接通任何播放源）"
+    [ "$IIR_MUX_HAS_SRC" = 1 ] \
+      && IIR_SKIP_REASON="$IIR_SKIP_REASON；本机可用源枚举: $IIR_MUX_NAMES —— 需先把播放通路接到 IIR 才能生效"
+    return 1
+  fi
+  IIR_OK=1
+  return 0
+}
+
+# 写入高通。SPK_LOUD=1/2 都走这里；mode 只影响数字音量那一段。
+iir_apply_hp() {
+  iir_probe || return 1
+  _fs_pair="$(iir_fs_of)"
+  _fs="${_fs_pair%% *}"; _fs_src="${_fs_pair#* }"
+  _co="$(iir_coeffs_for_fs "$_fs")"
+  case "$_co" in
+    FAIL:*)
+      printf '  !! 跳过 IIR：%s（采样率 %s，来源 %s）\n' "${_co#FAIL:}" "$_fs" "$_fs_src"
+      return 1 ;;
+  esac
+  # 已知采样率要跟基准表对上；未知采样率只做稳定性与幅频自检（awk 内部已验）
+  case "$_fs" in
+    48000) [ "$_co" = "$IIR_REF_48K" ] || { printf '  !! 跳过 IIR：48k 系数与基准表不符（%s）\n' "$_co"; return 1; } ;;
+    44100) [ "$_co" = "$IIR_REF_44K1" ] || { printf '  !! 跳过 IIR：44.1k 系数与基准表不符（%s）\n' "$_co"; return 1; } ;;
+  esac
+  # 先在 Off 状态写系数，再使能 —— 反过来会在运行中换系数，出爆音
+  if ! iir_set_bool "$IIR_NUM_EN" 0; then
+    printf '  !! 跳过 IIR：无法把 IIR0 Enable Band%s 置 Off\n' "$IIR_BAND"
+    return 1
+  fi
+  if ! pa_set_multi "$IIR_NUM_BAND" "IIR0 Band$IIR_BAND" $_co; then
+    printf '  !! 跳过 IIR：Band%s 多值写入被本机 tinymix 拒绝或读回不符（已回滚为原值）\n' "$IIR_BAND"
+    return 1
+  fi
+  if ! iir_set_bool "$IIR_NUM_EN" 1; then
+    printf '  !! 跳过 IIR：系数已写但使能失败，正在回滚\n'
+    pa_set_multi "$IIR_NUM_BAND" "IIR0 Band$IIR_BAND" 0 0 0 0 0 >/dev/null 2>&1 || true
+    return 1
+  fi
+  printf '  -> 硬件 IIR 高通已生效：%s Band%s @ %s Hz 采样率 %s（来源 %s）\n' \
+         "IIR0" "$IIR_BAND" "$IIR_HP_F" "$_fs" "$_fs_src"
+  printf '     系数 b0 b1 b2 a1 a2 = %s（Q30 定点，Q=%s）\n' "$_co" "$IIR_HP_Q"
+  printf '     路由 %s（本机可用枚举：%s）\n' "$IIR_MUX_USABLE" "${IIR_MUX_NAMES:-?}"
+  return 0
+}
+
+# 还原：使能 Off + 系数清零 + 数字音量回出厂。幂等，控件不存在就跳过。
+# 为什么先关使能再清系数：顺序反了会让一个 b=0/a=出厂 的混合状态短暂通过
+# IIR 块，那是纯噪声。
+#
+# 这里**故意不调用 iir_probe**：probe 会验路由，而还原的职责恰恰是清理，
+# 哪怕路由当前是 ZERO、哪怕用户从没开过 SPK_LOUD —— 一次崩溃的运行或旧版本
+# 配置都可能留下系数。只要控件存在就还原，才叫 100% 还原。
+iir_restore_hp() {
+  _ren="$(pa_numid_of "IIR0 Enable Band$IIR_BAND")"
+  _reb="$(pa_numid_of "IIR0 Band$IIR_BAND")"
+  if [ -z "$_ren" ] && [ -z "$_reb" ]; then
+    printf '  -> IIR 还原：本机无 IIR0 Band%s 控件，无需还原\n' "$IIR_BAND"
+    return 0
+  fi
+  _rr=0
+  [ -n "$_ren" ] && { iir_set_bool "$_ren" 0 || _rr=1; }
+  if [ -n "$_reb" ]; then
+    _rz="$(pa_get_multi "$_reb" "IIR0 Band$IIR_BAND")"
+    if [ "$_rz" = "0 0 0 0 0" ]; then
+      printf '  -> IIR 还原：Band%s 已是 0 0 0 0 0，无需改写\n' "$IIR_BAND"
+    else
+      pa_set_multi "$_reb" "IIR0 Band$IIR_BAND" 0 0 0 0 0 || _rr=1
+    fi
+  fi
+  if [ "$_rr" = 0 ]; then
+    printf '  -> IIR 还原：IIR0 Enable Band%s=Off，Band%s=0 0 0 0 0（回出厂）\n' "$IIR_BAND" "$IIR_BAND"
+    return 0
+  fi
+  printf '  !! IIR 还原未完全成功，请重启或再执行一次 hifi speaker auto\n'
+  return 1
+}
+
+# ---- speaker: digital front-end volume (the ONLY direction that adds level) --
+# Qualcomm 的 RXn Digital Volume 是**衰减索引**：gain_dB = (124 - v)/2，
+# 数值越大声音越小。模块自己（约 2118 行）就写着 "INT 0..124, LARGER =
+# QUIETER"。所以：
+#   * 原来自称 +3dB 的 84 -> 90 其实是 -3dB（调小）；
+#   * 只有把数字**减小**才是加音量。
+# 安全下限 72（= +26 dB 相对 124 的衰减量，模块 pa_wsa 阶梯的最深一档），
+# 而且只允许向下 —— 越界一律钳到 72，绝不写 71 以下。
+SPK_DIGITAL_MIN=72
+SPK_DIGITAL_FACTORY=84
+
+# 把 4 个 Codec 数字前端音量控件（按 numid 查）向下压到 floor。
+# 用法： spk_digital_boost <floor>
+# 返回已改动的控件数量（打印在最后一行之外的都是给人看的说明）。
+spk_digital_boost() {
+  _db_floor="$1"
+  case "$_db_floor" in
+    ''|*[!0-9]*) printf '  !! 数字音量下限非法：%s\n' "$_db_floor"; return 1 ;;
+  esac
+  [ "$_db_floor" -ge "$SPK_DIGITAL_MIN" ] || _db_floor="$SPK_DIGITAL_MIN"
+  [ "$_db_floor" -le "$SPK_DIGITAL_FACTORY" ] || _db_floor="$SPK_DIGITAL_FACTORY"
+  _db_n=0
+  for _db_name in "RX0 Digital Volume" "RX1 Digital Volume" \
+                  "RX0 Mix Digital Volume" "RX1 Mix Digital Volume"; do
+    _db_num="$(pa_numid_of "$_db_name")"
+    if [ -z "$_db_num" ]; then
+      printf '  ·  未找到控件 %s，跳过\n' "$_db_name"
+      continue
+    fi
+    _db_cur="$(pa_get "$_db_num" | tr -d '\r')"
+    case "$_db_cur" in
+      ''|*[!0-9]*) printf '  ·  控件 %s（numid %s）读回非整数 [%s]，跳过\n' "$_db_name" "$_db_num" "$_db_cur"; continue ;;
+    esac
+    if [ "$_db_cur" -le "$_db_floor" ]; then
+      printf '  ·  %s（numid %s）已是 %s，不再降低（下限 %s）\n' "$_db_name" "$_db_num" "$_db_cur" "$SPK_DIGITAL_MIN"
+      continue
+    fi
+    if pa_set_int "$_db_num" "$_db_floor"; then
+      printf '  ·  %s（numid %s）%s -> %s（衰减索引减小 = +%s dB，下限 %s）\n' \
+             "$_db_name" "$_db_num" "$_db_cur" "$_db_floor" \
+             "$(awk -v a="$_db_cur" -v b="$_db_floor" 'BEGIN{printf "%.1f", (a-b)/2}')" "$SPK_DIGITAL_MIN"
+      _db_n=$((_db_n + 1))
+    else
+      printf '  !! %s（numid %s）写入失败，保持原值\n' "$_db_name" "$_db_num"
+    fi
+  done
+  return "$_db_n"
+}
+
+# 数字音量还原到出厂 84（只在当前值小于 84 时写，避免无谓的控件触碰）
+spk_digital_restore() {
+  _dr_n=0
+  for _dr_name in "RX0 Digital Volume" "RX1 Digital Volume" \
+                  "RX0 Mix Digital Volume" "RX1 Mix Digital Volume"; do
+    _dr_num="$(pa_numid_of "$_dr_name")"
+    [ -n "$_dr_num" ] || continue
+    _dr_cur="$(pa_get "$_dr_num" | tr -d '\r')"
+    case "$_dr_cur" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$_dr_cur" -eq "$SPK_DIGITAL_FACTORY" ] && continue
+    if pa_set_int "$_dr_num" "$SPK_DIGITAL_FACTORY"; then
+      printf '  ·  %s（numid %s）%s -> %s（回出厂）\n' "$_dr_name" "$_dr_num" "$_dr_cur" "$SPK_DIGITAL_FACTORY"
+      _dr_n=$((_dr_n + 1))
+    else
+      printf '  !! %s（numid %s）还原失败，当前 [%s]\n' "$_dr_name" "$_dr_num" "$_dr_cur"
+    fi
+  done
+  return 0
+}
+
+# `hifi status` 的 speaker loud 一行。单独拿一个函数出来，只因为 heredoc 里
+# 嵌 && / || 加多层引号太难读，且一改就出错。
+_loud_txt() {
+  case "${SPK_LOUD:-0}" in
+    0) printf ' (off: codec untouched)' ;;
+    1) printf ' (IIR high-pass %s Hz, Q=%s)' "$IIR_HP_F" "$IIR_HP_Q" ;;
+    2) printf ' (IIR high-pass %s Hz + digital volume to %s)' "$IIR_HP_F" "$SPK_DIGITAL_MIN" ;;
+    *) printf '' ;;
+  esac
+}
+
 # ---- boot safety net v1.9.2: read-only view of the boot state ---------------
 do_bootmode() {
   # STATE is already the global one (set at L58 via HIFI_STATE_DIR); the
@@ -1628,6 +2798,46 @@ do_bootmode() {
 
 do_speaker() {
   case "${1:-}" in
+    loud|turbo)
+      # loud 档的新语义（v2.1）：不推功放增益，改砍超低频。
+      #
+      # 旧实现的两个 bug（已由真机转储与声学实测确认）：
+      #   Bug 1 控件名当 tinymix 参数。模块的 pa_set/pa_get 一律传数字 numid，
+      #         而老 tinymix 与 payload/tinyalsa_min.c 都是 strtoul(argv[1],0,10)，
+      #         字符串名被解析成 0 = "Voice Rx Device Mute"，每次都在误写语音
+      #         控件，且 2>/dev/null 把错误吞了。
+      #   Bug 1b 方向反了。RX0/RX1 Digital Volume 是 Qualcomm **衰减索引**：
+      #         gain_dB=(124-v)/2，数值越大声音越小。84 -> 90 是 -3 dB（调小）。
+      #   Bug 2  无效操作。G_DEFAULT / MAX_STATE_2 / VI=1 在真机全量转储里本来
+      #         就是出厂值，整个分支一个字节都没改，只打印了成功信息。
+      #
+      # 保留的仍是"链路纯净"部分（端口钉率 + 位深），并把 SPK_LOUD 记为 1
+      # （loud 至少要做 IIR 高通）；SPK_LOUD=2 时才允许压低数字音量。
+      SPK_RATE=auto; SPK_BITS=24; ENABLED=1
+      [ "${SPK_LOUD:-0}" = 0 ] && SPK_LOUD=1
+      save_conf
+      echo "扬声器响度最大化 loud 档：SPK_RATE=auto SPK_BITS=24 SPK_LOUD=$SPK_LOUD"
+      echo "  原理：砍掉扬声器发不出的超低频，释放振膜行程，让 TFA 的 DSP 限幅器"
+      echo "        不再被无效低频触发，中高频因此能推得更响（不增加硬件功率）。"
+      echo "  PA 增益不再动：TFA9874 的 G_DEFAULT 在固件里就等于满载 G_6_DB，"
+      echo "        真机声学实测推 +6dB 档与原厂档差 <0.5 dB（无物理收益）。"
+      # ---- 系数自校验：算不出来就一个字都不写 ----------------------------
+      if ! iir_selftest >/dev/null 2>&1; then
+        echo "  !! 跳过硬件 IIR：本机 awk 算出的系数与内置基准表不一致（精度不足）"
+        echo "     已知基准：48k = $IIR_REF_48K"
+        echo "              44.1k = $IIR_REF_44K1"
+      elif ! iir_apply_hp; then
+        echo "  -> 硬件 IIR 高通已跳过：${IIR_SKIP_REASON:-系数或控件校验未通过}"
+      fi
+      # ---- 数字前端音量：只有"减小"才是加音量，且必须 >= 72 --------------
+      if [ "$SPK_LOUD" = 2 ]; then
+        echo "  -> SPK_LOUD=2：允许把数字前端音量（衰减索引）向下压到 $SPK_DIGITAL_MIN"
+        spk_digital_boost "$SPK_DIGITAL_MIN" || true
+      else
+        echo "  -> SPK_LOUD=$SPK_LOUD：数字前端音量保持出厂 $SPK_DIGITAL_FACTORY（要压到 $SPK_DIGITAL_MIN 请先 hifi set speloud 2）"
+      fi
+      echo "  -> 还原：hifi speaker auto（IIR 关+清零、数字音量回 $SPK_DIGITAL_FACTORY）"
+      ;;
     flat)
       SPK_RATE=44100; SPK_BITS=24; ENABLED=1
       save_conf
@@ -1641,13 +2851,40 @@ do_speaker() {
       echo "  高端设备 / HiRes 扬声器实验用；如果扬声器无声请立即: hifi speaker auto"
       ;;
     auto)
-      SPK_RATE=auto; SPK_BITS=16; ENABLED=1
+      SPK_RATE=auto; SPK_BITS=16; ENABLED=1; SPK_LOUD=0
       save_conf
-      echo "扬声器还原 auto 档：SPK_RATE=auto SPK_BITS=16（回到原厂行为）"
+      echo "扬声器还原 auto 档：SPK_RATE=auto SPK_BITS=16 SPK_LOUD=0（回到原厂行为）"
+      # 100% 还原三件套：IIR 使能 Off、系数清零、数字音量回 84。
+      # 顺序固定（先关使能再清系数），控件不存在就跳过 —— 全部走 pa_set /
+      # pa_set_multi（回读校验），不再用裸 $TMIX。
+      iir_restore_hp || true
+      spk_digital_restore
+      if pa_detect >/dev/null 2>&1; then
+        [ "$PA_BACKEND" = "tfa" ] && pa_set $TM_SPK_GAIN "G_DEFAULT" >/dev/null 2>&1 || true
+      fi
       ;;
     status)
       printf 'speaker rate : %s\n' "$SPK_RATE"
       printf 'speaker bits : %s\n' "$SPK_BITS"
+      printf 'speaker loud : %s%s\n' "$SPK_LOUD" \
+        "$(case "$SPK_LOUD" in 0) printf ' (off: 不动 codec)';; 1) printf ' (IIR 高通 only)';; 2) printf ' (IIR 高通 + 数字音量到 72)';; esac)"
+      # IIR 现状：路由可用性 + 实际使能/系数（只读，不写控件）
+      if iir_probe >/dev/null 2>&1; then
+        printf 'iir high-pass: 可用   Band%s enable=%s  系数=[%s]\n' "$IIR_BAND" \
+               "${IIR_PREV_EN:-?}" "${IIR_PREV_BAND:-?}"
+        printf '              路由 %s（可用源枚举: %s）\n' "$IIR_MUX_USABLE" "${IIR_MUX_NAMES:-?}"
+      else
+        printf 'iir high-pass: 不可用/未接通 -- %s\n' "$IIR_SKIP_REASON"
+      fi
+      # 数字前端音量现状（衰减索引，越大越小）
+      for _st_name in "RX0 Digital Volume" "RX1 Digital Volume"; do
+        _st_num="$(pa_numid_of "$_st_name")"
+        [ -n "$_st_num" ] || continue
+        _st_v="$(pa_get "$_st_num" | tr -d '\r')"
+        printf '%-14s: %s%s\n' "$_st_name" "${_st_v:-n/a}" \
+          "$(case "$_st_v" in ''|*[!0-9]*) : ;; 84) printf ' (出厂)';;
+              *) awk -v v="$_st_v" 'BEGIN{printf " (≈ %+.1f dB vs 84)", (84-v)/2}' ;; esac)"
+      done
       if [ -r "$MODDIR/bin/probe192.sh" ]; then
         HIFI_PROBE_SECTION=adapt; export HIFI_PROBE_SECTION
         sh "$MODDIR/bin/probe192.sh" 2>/dev/null | sed -n '/^\[9\]/,$p'
@@ -1656,11 +2893,15 @@ do_speaker() {
       fi
       return 0 ;;
     *)
-      echo "speaker must be one of: flat | hires | auto | status"
+      echo "speaker must be one of: loud | flat | hires | auto | status"
+      echo "  loud   : 扬声器响度最大化 -- 硬件 IIR 高通（160Hz, Q=0.7071）砍掉发不出的"
+      echo "           超低频，释放振膜行程；SPK_LOUD=2 时额外把数字音量压到 72"
+      echo "           （衰减索引，数值小 = 更响）。不动 PA 增益：固件里已满载。"
       echo "  flat   : SPK_RATE=44100 SPK_BITS=24 -- 44.1k 曲库免 SRC（推荐）"
       echo "  hires  : SPK_RATE=192000 SPK_BITS=32 -- 高端设备 / HiRes 扬声器实验"
-      echo "  auto   : SPK_RATE=auto SPK_BITS=16 -- 回到原厂行为"
-      echo "  status : 当前扬声器档位 + 本机厂商 DSP 检测结果"
+      echo "  auto   : SPK_RATE=auto SPK_BITS=16 SPK_LOUD=0 -- 100% 还原出厂"
+      echo "           （IIR0 Enable Band1=Off、Band1=0 0 0 0 0、数字音量回 84）"
+      echo "  status : 当前扬声器档位 + IIR 可用性 + 本机厂商 DSP 检测结果"
       return 1 ;;
   esac
   echo "applying..."
@@ -1682,7 +2923,7 @@ do_speaker() {
 # is ever written to a control the probe did not map -- safety first.
 #
 #   1. tfa     -- NXP TFA9874 (Redmi K20 Pro / raphael probe, see the
-#                 maintainer report).  WRITABLE (gain + vi), the v2.0.0 path:
+#                 maintainer report).  WRITABLE (gain + vi), the v2.0.2 path:
 #   3174 TFA Profile            single "speaker" tier, switching is refused
 #   22   EAR PA Gain            earpiece (no user command -- mis-touch guard)
 #   23   EAR SPKR PA Gain       loudspeaker gain, the knob users actually want
@@ -1716,7 +2957,7 @@ do_speaker() {
 # never emitted, not even by accident.
 #
 # MIXER USERLAND RESOLUTION (three stages, first match wins):
-#   1. a real `tinymix` on PATH -- the v2.0.0 behaviour, byte-for-byte;
+#   1. a real `tinymix` on PATH -- the v2.0.2 behaviour, byte-for-byte;
 #   2. the module's own static fallback, $MODDIR/bin/tinymix_min (source:
 #      payload/tinyalsa_min.c, pure kernel UAPI, musl-static ~33 KB).  Several
 #      ROMs -- MediaTek devices in particular -- ship no tinymix at all, which
@@ -1755,7 +2996,7 @@ PA_SNAPSHOT="$STATE/pa.txt"
 #             the dump, never assumed.
 #   unknown : neither probe answers (desktop harness, truly PA-less phones).
 # The TFA control numbers above stay exactly where they were: the tfa path is
-# byte-for-byte the v2.0.0 behaviour.
+# byte-for-byte the v2.0.2 behaviour.
 PA_BACKEND="unknown"
 # WSA instance table.  A device can carry ONE chip (mono: RX0 only, or stereo:
 # RX0+RX1 under the same prefix) or SEVERAL chips (dual-chip stereo: WSA_ and
@@ -1885,7 +3126,37 @@ _pa_dump() {
   if [ -z "${_PA_DUMP_CACHE:-}" ]; then
     _PA_DUMP_CACHE="$($TMIX 2>/dev/null | tr -d '\r')"
   fi
-  printf '%s\n' "$_PA_DUMP_CACHE"
+  # 🔴 ANDROID PLATFORM TRAP -- do NOT "simplify" this back to printf.
+  #
+  # On Android, `printf` is NOT a shell builtin: it is the external binary
+  # /system/bin/printf.  Emitting the cached dump through it therefore goes
+  # through execve(), and the whole dump is ONE argv element of ~245 KB
+  # (measured on the K20 Pro: 3450 lines / 250741 bytes).  That exceeds ARG_MAX
+  # and the command dies with "/system/bin/printf: Argument list too long",
+  # writing NOTHING to stdout.
+  #
+  # The failure is silent in the worst possible way: the assignment above
+  # SUCCEEDS (${#_PA_DUMP_CACHE} is a healthy 250740), so only the OUTPUT is
+  # lost.  Every dump consumer then sees an empty dump and concludes the
+  # opposite of the truth:
+  #   - pa_numid_of()    -> "" for every control => IIR probe reports
+  #                         "no IIR0 Band1 on this device" and the high-pass
+  #                         is skipped on hardware that actually has the block
+  #   - pa_probe_wsa()   -> no WSA instance => wrong backend (or none)
+  #   - pa_probe_tfa()   -> falls through the semantic check
+  # A desktop bash `printf` IS a builtin and has no argv limit, which is
+  # exactly why the offline suite stayed green while the phone was broken.
+  #
+  # `echo` is an mksh builtin, so the buffer never reaches execve.  Verified on
+  # the device: echo emits 250741 bytes / 3450 lines with no stderr, and the
+  # full probe chain then resolves IIR0 Enable Band1 -> 92, IIR0 Band1 -> 102,
+  # IIR0 INP0 MUX -> 237, EAR SPKR PA Gain -> 23.
+  #
+  # The dump is machine-generated from control names/values: it contains no
+  # backslash escapes and no line starts with '-', so mksh echo's option/escape
+  # handling cannot corrupt it.  If that ever stops being true, switch to a
+  # heredoc (its body travels on stdin, not argv, so ARG_MAX does not apply).
+  echo "$_PA_DUMP_CACHE"
 }
 
 # Normalise ANY tinymix dump dialect into the legacy 3-field shape
@@ -2663,6 +3934,25 @@ do_verify() {
                "$(sh "$HALPATCH" --check "$live" "$MAX_RATE" 2>&1 | tail -n1)"
         continue
       fi
+      if is_volume_target "$live"; then
+        # a volume table carries NO marker by construction: the patch has to keep
+        # the file byte-identical in length, so there is nowhere to stamp one.
+        # Its proof is the checker, run live against the archived factory copy --
+        # that is also exactly what target_applied() used to accept the mount.
+        printf '    layer      : volume table -- speaker/music curve (layer 4)\n'
+        printf '    curve      : last %s step(s) at 0 dB\n' "$VOL_POINTS"
+        stk_v="$STATE/stock/$(flatten "$live")"
+        if [ -r "$stk_v" ] && [ -r "$live" ]; then
+          if awk -v SPK_POINTS="$VOL_POINTS" -f "$VOLCHECK" "$stk_v" "$live" >/dev/null 2>&1; then
+            printf '    check      : pass (factory copy vs live: only the tail lifted)\n'
+          else
+            printf '    check      : FAIL -- the live file is not a pure tail-lift of the archive\n'
+          fi
+        else
+          printf '    check      : no factory archive to compare against\n'
+        fi
+        continue
+      fi
       [ -r "$live" ] || continue
       printf '    marker     : %s line(s)\n' "$(grep -c "$MARKER" "$live" 2>/dev/null)"
       printf '    dialect    : %s\n' "$(sed -n "s/.*| dialect=\([a-z]*\) |.*/\1/p" "$live" 2>/dev/null | head -n1)"
@@ -2786,8 +4076,8 @@ usage() {
   # through `hifi`'s help text.
   _uv="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1 \
          | tr -d '\\`$' | tr -cd 'A-Za-z0-9._+-')"
-  # module.prop carries a bare "2.0.0"; the help text shows "v2.0.0".  Drop an
-  # optional leading v so the two can never render as "vv2.0.0", and fall back
+  # module.prop carries a bare "2.0.0"; the help text shows "v2.0.2".  Drop an
+  # optional leading v so the two can never render as "vv2.0.2", and fall back
   # to the same "v?" the WebUI version badge uses.
   _uv="${_uv#v}"; _uv="${_uv#V}"
   [ -n "$_uv" ] || _uv="?"
@@ -2820,6 +4110,22 @@ HiFi SRC Bypass  (universal)   v${_uv}
   hifi set restart 1       restart the audio stack after applying (1 / 0)
   hifi set enabled 0       boot-time intent only (advanced)
   hifi set hal 1           also unlock the USB HAL library's own rate table (1 / 0)
+  hifi set volunlock 1     lift the CEILING of the speaker/music volume curve
+                           (audio_policy_volumes.xml + default_volume_tables.xml):
+                           the last 3 steps go from e.g. -3 dB to 0 dB, which is
+                           what actually raises the maximum loudspeaker output.
+                           THIS CHANGES MAXIMUM ACOUSTIC OUTPUT -- start at low
+                           volume and check for clipping.  0 = factory (default)
+  hifi set speloud 1       speaker loudness mode (0 / 1 / 2), default 0:
+                           0 = 不碰;  1 = 只做硬件 IIR 高通 (160 Hz, Q=0.7071);
+                           2 = 额外允许把 Qualcomm 数字前端音量压到 72.
+                           The IIR high-pass cuts the sub-bass the loudspeaker
+                           cannot reproduce, which frees diaphragm excursion so
+                           TFA's DSP limiter stops being tripped by inaudible
+                           low frequencies and lets mid/high pass through
+                           louder.  PA gain is NOT raised: TFA9874's G_DEFAULT
+                           is already the firmware maximum (measured <0.5 dB
+                           difference), so that knob has no physical headroom.
   hifi preset auto         detect the dongle ceiling and configure it (recommended)
   hifi preset 384k         CX31993 / full-fat
   hifi preset 192k         generic 192 kHz compatibility tier
@@ -2827,12 +4133,23 @@ HiFi SRC Bypass  (universal)   v${_uv}
   hifi preset 44k          align the system mixer to a 44.1 kHz library
   hifi preset 192mix       raise the global mixer to 192 kHz
   hifi preset 384mix       raise the global mixer to 384 kHz (high-end only)
+  hifi speaker loud        speaker loudness: hardware IIR high-pass at 160 Hz
+                           (Q=0.7071) cuts the sub-bass the speaker cannot make,
+                           freeing excursion so the DSP limiter stops cutting
+                           the mid/high band -- louder without more PA power.
+                           SPK_LOUD=2 also lowers the digital front-end volume
+                           to 72 (attenuation index: smaller = louder).
+                           Skips itself, with the reason printed, when the IIR
+                           block has no live playback route (INP* MUX = ZERO).
   hifi speaker flat        speaker best practice: SPK_RATE=44100 SPK_BITS=24
                            (44.1k library; for a 48k library use: hifi set spk 48000)
   hifi speaker hires       experimental HiRes speaker tier: SPK_RATE=192000 SPK_BITS=32
                            (if the speaker goes silent, run: hifi speaker auto)
-  hifi speaker auto        back to the factory speaker behaviour (16-bit, auto rate)
-  hifi speaker status      current speaker knobs + the vendor DSP check of probe [9]
+  hifi speaker auto        100% factory speaker behaviour: 16-bit, auto rate,
+                           IIR0 Enable Band1=Off, Band1=0 0 0 0 0, digital
+                           volume back to 84, SPK_LOUD=0
+  hifi speaker status      current speaker knobs + IIR availability + the vendor
+                           DSP check of probe [9]
   hifi pa                  smart PA status overview (read-only; auto-detects
                            TFA9874 / Qualcomm WSA / Awinic / CS35L / MTK)
   hifi pa status           same as above
@@ -2871,7 +4188,7 @@ case "${1:-status}" in
   status)     ensure_dirs; load_conf; do_status ;;
   dac)        ensure_dirs; load_conf; cmd_dac ;;
   json)       ensure_dirs; load_conf; status_json ;;
-  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\nspk options     : %s\nspkbit options  : %s\nspkdsp options  : %s\n' \
+  rates)      printf 'ceiling options : %s\nmixer options   : %s\nhifi options    : %s\nbitdepth options: %s\nspk options     : %s\nspkbit options  : %s\nspkdsp options  : %s\nspeloud options : 0 1 2\n' \
                      "$ALL_RATES" "$ALL_MIXER" "$ALL_HIFI" "$ALL_BITS" "$ALL_SPK" "$ALL_SPK_BITS" "$ALL_SPKDSP" ;;
   scan)       ensure_dirs; load_conf; prepare || true; do_ports ;;
   ports)      ensure_dirs; load_conf; do_ports ;;
@@ -2881,9 +4198,9 @@ case "${1:-status}" in
   speaker)    ensure_dirs; load_conf; do_speaker "${2:-}" ;;
   pa)         ensure_dirs; load_conf; do_pa "${2:-}" "${3:-}" ;;
   bootmode)   ensure_dirs; do_bootmode ;;
-  apply)      ensure_dirs; load_conf; do_apply ;;
-  restore)    ensure_dirs; load_conf; do_restore ;;
-  reset)      ensure_dirs; load_conf; do_restore ;;
+  apply)      ensure_dirs; load_conf; do_apply "${2:-}" ;;
+  restore)    ensure_dirs; load_conf; do_restore "${2:-}" ;;
+  reset)      ensure_dirs; load_conf; do_restore "${2:-}" ;;
   verify)     ensure_dirs; load_conf; do_verify ;;
   # used by service.sh / action.sh: they must not grep for the text marker,
   # because a HAL library can never carry one

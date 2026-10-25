@@ -98,6 +98,62 @@ static void print_row(unsigned num, struct snd_ctl_elem_info *i,
     printf("\n");
 }
 
+/* ---- multi-slot integer writes ------------------------------------------
+ * A Qualcomm hardware-IIR coefficient control is ONE control with count=5
+ * ("IIR0 Band1", five Q30 fixed-point biquad coefficients).  The original
+ * write path did
+ *
+ *     for (k = 0; k < i.count; k++) value[k] = atoi(val);
+ *
+ * which copies atoi(argv[2]) into ALL five slots: "b0 b1 b2 a1 a2" collapses
+ * to five copies of b0, i.e. a biquad with a garbage denominator -- an
+ * unstable filter that can self-oscillate.  A half-written coefficient set is
+ * strictly worse than no filter at all, so the write path must either fill
+ * every slot correctly or refuse.
+ *
+ * Token collection accepts BOTH call shapes, because both occur in the wild:
+ *   tinymix_min <num> 1057957290 -2115914580 ...   (extra argv entries)
+ *   tinymix_min <num> "1057957290 -2115914580 ..." (one argv, space-split)
+ *
+ * Rules (backward compatible for every existing single-value call site):
+ *   1 token          -> copy it into all slots      (old behaviour, bools, INT1)
+ *   exactly count    -> one token per slot
+ *   anything else    -> refuse, print an error, exit non-zero, write nothing
+ */
+static int collect_tokens(int argc, char **argv, long long *out, unsigned max) {
+    unsigned n = 0;
+    for (int a = 2; a < argc; a++) {
+        const char *p = argv[a];
+        while (*p && n < max) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            char *end = 0;
+            long long v = strtoll(p, &end, 10);
+            if (end == p) return -1;            /* not a number */
+            out[n++] = v;
+            p = end;
+        }
+    }
+    return (int)n;
+}
+
+/* Fill `count` integer slots from the collected tokens.  Returns 0 on
+ * success, -1 on a refused / impossible write (caller must not ioctl). */
+static int fill_slots(long long *tok, int ntok, unsigned count,
+                      long long *slots, unsigned max) {
+    unsigned k;
+    if (count == 0 || count > max) return -1;
+    if (ntok == 1) {                            /* legacy: broadcast one value */
+        for (k = 0; k < count; k++) slots[k] = tok[0];
+        return 0;
+    }
+    if ((unsigned)ntok == count) {
+        for (k = 0; k < count; k++) slots[k] = tok[k];
+        return 0;
+    }
+    return -1;                                  /* wrong arity: refuse */
+}
+
 int main(int argc, char **argv) {
     struct snd_ctl_elem_list l;
     memset(&l, 0, sizeof l);
@@ -129,6 +185,8 @@ int main(int argc, char **argv) {
         unsigned num = (unsigned)strtoul(argv[1], 0, 10);
         const char *val = argv[2];
         struct snd_ctl_elem_info i; struct snd_ctl_elem_value v;
+        long long tok[8];
+        int ntok;
         if (get_info(num, &i) < 0) { fprintf(stderr, "Invalid mixer control: %u\n", num); return 1; }
         memset(&v, 0, sizeof v); v.id.numid = num;
         if (i.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED) {
@@ -146,11 +204,25 @@ int main(int argc, char **argv) {
                 (strcmp(val, "1") == 0 || strcasecmp(val, "on") == 0 ||
                  strcasecmp(val, "true") == 0) ? 1 : 0;
         } else if (i.type == SNDRV_CTL_ELEM_TYPE_INTEGER64) {
+            long long slots[8];
+            ntok = collect_tokens(argc, argv, tok, 8);
+            if (ntok < 0 || fill_slots(tok, ntok, i.count, slots, 8) < 0) {
+                fprintf(stderr, "need 1 or %u integer values, got %d arguments\n",
+                        i.count, argc - 2);
+                return 1;
+            }
             for (unsigned k = 0; k < i.count && k < 8; k++)
-                v.value.integer64.value[k] = strtoll(val, 0, 10);
+                v.value.integer64.value[k] = slots[k];
         } else if (i.type == SNDRV_CTL_ELEM_TYPE_INTEGER) {
+            long long slots[8];
+            ntok = collect_tokens(argc, argv, tok, 8);
+            if (ntok < 0 || fill_slots(tok, ntok, i.count, slots, 8) < 0) {
+                fprintf(stderr, "need 1 or %u integer values, got %d arguments\n",
+                        i.count, argc - 2);
+                return 1;
+            }
             for (unsigned k = 0; k < i.count && k < 8; k++)
-                v.value.integer.value[k] = atoi(val);
+                v.value.integer.value[k] = (long)slots[k];
         } else {
             fprintf(stderr, "unsupported control type: %u\n", i.type); return 1;
         }

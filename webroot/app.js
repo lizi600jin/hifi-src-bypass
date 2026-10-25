@@ -132,6 +132,7 @@
     spk: 'auto', spkBits: 16, spkDsp: 16,
     paGain: null, paBoost: null,       /* smart PA knobs from `hifi json` */
     paConfirm: null,                   /* first click of the two-step confirm */
+    paLastNonZero: 1,                  /* remembered non-zero tier for A/B audition */
     restart: true, applied: false, enabled: 1,
     bridge: null,          /* which window object answered                   */
     form: null,            /* which call signature that object speaks        */
@@ -321,15 +322,7 @@
     bgRenderSoon();
   }
 
-  /* ------------------------------------------------ crop editor (canvas 2D)
-   * Album-style WYSIWYG crop: the FRAME is fixed at the chosen aspect ratio
-   * and the USER MOVES/SCALES THE IMAGE inside it.  Everything outside the
-   * frame is dimmed by a mask, and ONLY the frame's pixels get exported, so
-   * the saved image is exactly the final background.  Constraints: the image
-   * can never scale below "cover the frame" and never drag its edges inside
-   * the frame -- no holes, always covered.  Coordinates use a fixed logical
-   * resolution (canvas backing store scaled by devicePixelRatio for
-   * sharpness); the export covers exactly the frame rect. */
+  /* ------------------------------------------------ crop editor (canvas 2D) */
   var BG_RATIOS = [
     ['9:19.5', '9:19.5（全面屏 · 推荐）', 9 / 19.5],
     ['9:16', '9:16（传统）', 9 / 16],
@@ -340,11 +333,9 @@
   var BG_MAX_ZOOM = 5;
   var bgEdit = {
     img: null, jpeg: false, ratio: '9:19.5',
-    /* frame rect in canvas logical px; canvas logical size == frame size +
-       a small dimmed margin so the "outside" is visible */
     fw: 0, fh: 0, fx: 0, fy: 0,
-    k: 1,                 /* image->canvas scale (image px -> logical px)  */
-    dx: 0, dy: 0,         /* image top-left in logical px                  */
+    k: 1,
+    dx: 0, dy: 0,
     lastX: 0, lastY: 0, pinch: 0, dpr: 1
   };
 
@@ -357,12 +348,10 @@
     return 9 / 19.5;
   }
 
-  /* (re)size the canvas: the FRAME fills the width at the chosen ratio, with
-     a slim dimmed margin around it.  Backing store is scaled by dpr. */
   function bgCanvasSize() {
     var c = $('bgCanvas');
     var cw = (c.parentNode.clientWidth || c.clientWidth || 320) - 2;
-    var m = Math.max(6, Math.round(cw * 0.03));       /* dimmed margin */
+    var m = Math.max(6, Math.round(cw * 0.03));
     var fw = Math.max(120, cw - m * 2);
     var fh = Math.max(120, Math.round(fw / bgRatioValue()));
     var dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
@@ -374,19 +363,12 @@
     return { w: fw + m * 2, h: fh + m * 2 };
   }
 
-  /* smallest k that still covers the frame */
   function bgMinScale() {
     var img = bgEdit.img;
     if (!img) return 0.01;
     return Math.max(bgEdit.fw / img.width, bgEdit.fh / img.height);
   }
 
-  /* clamp k to [cover, 5x cover] and dx/dy so the image always covers
-     the frame (no hole anywhere inside the frame).  Per axis the legal pan
-     interval is [fx, fx+fw-W*k] when the image is wider than the frame and
-     the mirror image of it when narrower -- order lo/hi explicitly, a naive
-     min(fx+fw-W*k, max(fx, dx)) collapses to the lower bound whenever the
-     image overflows the frame and pins the picture to the bottom-right. */
   function bgClamp() {
     var kmin = bgMinScale();
     bgEdit.k = Math.min(kmin * BG_MAX_ZOOM, Math.max(kmin, bgEdit.k));
@@ -406,7 +388,6 @@
         bgCanvasSize();
         bgEdit.img = img;
         bgEdit.jpeg = /image\/jpe?g/i.test(String(file.type || ''));
-        /* initial: cover the frame, centred */
         bgEdit.k = bgMinScale();
         bgEdit.dx = bgEdit.fx + (bgEdit.fw - img.width * bgEdit.k) / 2;
         bgEdit.dy = bgEdit.fy + (bgEdit.fh - img.height * bgEdit.k) / 2;
@@ -429,8 +410,6 @@
     if (!bgEdit.img) return;
     bgClamp();
     var lw = c.width / d, lh = c.height / d;
-    /* dimmed backdrop, then the image, then a darker mask with the frame
-       cut out -- the frame interior shows the untouched picture (WYSIWYG) */
     ctx.fillStyle = 'rgba(0,0,0,.45)';
     ctx.fillRect(0, 0, lw, lh);
     ctx.drawImage(bgEdit.img, bgEdit.dx, bgEdit.dy,
@@ -440,13 +419,11 @@
     ctx.fillRect(0, bgEdit.fy + bgEdit.fh, lw, lh - bgEdit.fy - bgEdit.fh);
     ctx.fillRect(0, bgEdit.fy, bgEdit.fx, bgEdit.fh);
     ctx.fillRect(bgEdit.fx + bgEdit.fw, bgEdit.fy, lw - bgEdit.fx - bgEdit.fw, bgEdit.fh);
-    /* frame border so the crop area is unmistakable */
     ctx.strokeStyle = 'rgba(255,255,255,.9)';
     ctx.lineWidth = 2;
     ctx.strokeRect(bgEdit.fx + 1, bgEdit.fy + 1, bgEdit.fw - 2, bgEdit.fh - 2);
   }
 
-  /* zoom keeping the point (px,py) -- in logical px -- visually fixed */
   function bgScaleAt(factor, px, py) {
     if (!bgEdit.img) return;
     var k0 = bgEdit.k;
@@ -462,9 +439,6 @@
     bgCanvasDraw();
   }
 
-  /* switch the frame ratio: resize, re-cover and redraw.  The pill host is
-     re-rendered deferred -- this click is still bubbling to the document
-     delegate which reads el.parentNode (same trap as pillBg). */
   function bgSetRatio(key) {
     bgEdit.ratio = key;
     setTimeout(bgRenderRatio, 0);
@@ -490,9 +464,6 @@
     });
   }
 
-  /* export ONLY the frame rect at full backing-store resolution: draw the
-     image, offset by -frame, into a fresh canvas -- the mask never enters
-     the export.  PNG lossless by default, JPEG kept for jpeg sources. */
   function bgExport() {
     var img = bgEdit.img;
     var d = bgEdit.dpr || 1;
@@ -507,8 +478,6 @@
                        : off.toDataURL('image/png');
   }
 
-  /* fit the frame export into w*h (single lossless resample) -- last resort
-     over budget; the frame ratio is preserved */
   function bgExportScaled(w, h) {
     var img = bgEdit.img;
     var d = bgEdit.dpr || 1;
@@ -530,9 +499,6 @@
     var data = bgExport();
     var over = data.length - BG_BUDGET;
     if (over > 0) {
-      /* 1st retry: PNG lossless (only relevant for jpeg sources).  2nd and
-         last resort: ONE downscale of the frame export -- and we say so,
-         with the exact size.  The frame ratio is never changed. */
       if (bgEdit.jpeg) {
         var d = bgEdit.dpr || 1;
         data = bgExportScaled(Math.round(bgEdit.fw * d), Math.round(bgEdit.fh * d));
@@ -555,7 +521,6 @@
     }
     var st = bgStore();
     if (!st) { bgMsg('当前环境不支持 localStorage，无法保存自定义图。'); return; }
-    /* overwrite confirm: total size across the three custom slots matters */
     var total = 0;
     BG_CUSTOM.forEach(function (k2) { total += (bgLoadCustom(k2) || '').length; });
     if ((bgLoadCustom(slot.key) || '').length > 0) {
@@ -576,7 +541,6 @@
   }
 
   function bgPickTarget() {
-    /* prefer the active slot if it is custom, else first empty, else uc1 */
     var cur = state.bg.active >= 0 ? state.bg.slots[state.bg.active] : null;
     if (cur && cur.custom) return state.bg.active;
     for (var i = 3; i < 6; i++) {
@@ -660,8 +624,6 @@
     $('bgName').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); bgRename(); }
     });
-    /* panel opacity slider: applies at once and persists in the same meta key
-       (opacity = foreground panel percent, 0..100) */
     $('bgOpacity').addEventListener('input', function () {
       state.bg.opacity = Math.min(100, Math.max(0, Math.round(Number(this.value) || 0)));
       var ov = $('bgOpacityVal');
@@ -677,7 +639,6 @@
     });
 
     var c = $('bgCanvas');
-    /* ratio pills live in the editor; a click re-frames the crop */
     var rhost = $('bgRatio');
     if (rhost) {
       rhost.addEventListener('click', function (ev) {
@@ -686,9 +647,6 @@
         bgSetRatio(el.dataset.ratio);
       });
     }
-    /* album-style gestures inside the fixed frame.  Pointer coords are
-       converted to canvas logical px (client -> rect -> minus margin,
-       backing store is dpr-scaled but drawing is in logical px). */
     function bgPt(e) {
       var r = c.getBoundingClientRect();
       return {
@@ -696,7 +654,6 @@
         y: (e.clientY - r.top) * (c.height / (r.height * (bgEdit.dpr || 1))) - 0
       };
     }
-    /* one-finger drag / two-finger pinch (anchored at the pinch centre) */
     c.addEventListener('touchstart', function (e) {
       if (e.touches.length === 1) {
         var p = bgPt(e.touches[0]);
@@ -726,14 +683,11 @@
     }, { passive: false });
     c.addEventListener('touchend', function (e) {
       bgEdit.pinch = 0;
-      /* a finger was lifted during a pinch: re-anchor the one-finger drag to
-         whichever touch remains, else the next move jumps from stale coords */
       if (e.touches.length === 1) {
         var p = bgPt(e.touches[0]);
         bgEdit.lastX = p.x; bgEdit.lastY = p.y;
       }
     });
-    /* mouse: drag with the button held, wheel zooms at the cursor */
     c.addEventListener('mousedown', function (e) {
       var p = bgPt(e);
       bgEdit.lastX = p.x; bgEdit.lastY = p.y;
@@ -771,15 +725,9 @@
     return null;
   }
 
-  /* the signatures we are willing to speak, most likely first.
-     name3-json is the official KernelSU contract and is expected to win. */
   var FORMS = ['name3-json', 'fn3-json', 'fn2', 'obj3', 'sync1'];
-
   var cbSeq = 0;
 
-  /* Run one command through one call form.
-     Resolves with {errno,stdout,stderr}, or with null when the form produced
-     no result at all (wrong signature for this manager).                     */
   function tryForm(b, form, cmd, grace) {
     return new Promise(function (resolve) {
       var settled = false;
@@ -793,7 +741,6 @@
         try { delete window[cbName]; } catch (e) { /* ignore */ }
         resolve(v);
       }
-      /* the native bridge invokes window[cbName](errno, stdout, stderr) */
       window[cbName] = function (errno, out, err) {
         finish({
           errno: Number(errno) || 0,
@@ -811,11 +758,10 @@
         else if (form === 'obj3')       r = b.exec(cmd, { cwd: '/' }, done);
         else                            r = b.exec(cmd);
       } catch (e) {
-        finish(null);                       /* signature rejected outright */
+        finish(null);
         return;
       }
 
-      /* some managers answer synchronously or with a promise instead */
       if (r && typeof r.then === 'function') {
         r.then(function (v) {
           if (typeof v === 'string') done(0, v, '');
@@ -826,8 +772,6 @@
       if (typeof r === 'string') { done(0, r, ''); return; }
       if (r && typeof r === 'object' && 'errno' in r) { done(r.errno, r.stdout, r.stderr); return; }
 
-      /* undefined -> this form is asynchronous.  If the native side is not
-         actually going to call back, we find out here instead of hanging. */
       timer = setTimeout(function () { finish(null); }, grace);
     });
   }
@@ -862,8 +806,6 @@
       .then(function (form) { return tryForm(b, form, cmd, CMD_GRACE); })
       .then(function (r) {
         if (!r) {
-          /* a form that worked before went quiet - renegotiate exactly once,
-             then report the truth instead of inventing a bogus cause */
           state.form = null;
           negotiation = null;
           if (depth === 0) return sh(cmd, 1);
@@ -916,6 +858,97 @@
   function clip(s, n) {
     s = String(s == null ? '' : s);
     return s.length > n ? s.slice(0, n) + ' …(+' + (s.length - n) + 'B)' : s;
+  }
+
+  /* Enhanced terminal renderer: preserves exact plain-text in el.textContent
+     while wrapping lines for pure-CSS line numbers and collapsible sections */
+  function renderTerminal(el, rawText, allowFold) {
+    if (!el) return;
+    var txt = String(rawText == null ? '—' : rawText);
+    el.dataset.raw = txt;
+    var lines = txt.split('\n');
+    if (lines.length <= 1 && (txt === '—' || !txt)) {
+      el.textContent = txt || '—';
+      return;
+    }
+    var html = [];
+    var inSec = false;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      var isSecHd = allowFold && /^(\s*===|\s*\[[0-9a-zA-Z]+\]|\s*[①②③④⑤⑥⑦⑧])/.test(l);
+      var cls = 'log-line';
+      if (isSecHd) cls += ' hl-sec log-sec-hd';
+      else if (/✅|已生效|已挂载|RUNNING|PCM_24|PCM_32/.test(l)) cls += ' hl-ok';
+      else if (/⚠|失败|未生效|被拒|不支持/.test(l)) cls += ' hl-warn';
+
+      var nl = i < lines.length - 1 ? '\n' : '';
+      if (isSecHd) {
+        if (inSec) html.push('</div></div>');
+        html.push('<div class="log-sec"><span class="' + cls + '">' + esc(l) + nl + '</span><div class="log-sec-body">');
+        inSec = true;
+      } else {
+        html.push('<span class="' + cls + '">' + esc(l) + nl + '</span>');
+      }
+    }
+    if (inSec) html.push('</div></div>');
+    el.innerHTML = html.join('');
+  }
+
+  function copyTerminal(boxId, btnEl) {
+    var el = $(boxId);
+    if (!el) return;
+    var text = el.dataset.raw || el.textContent || '';
+    if (!text || text === '—') {
+      toast('暂无可复制的日志内容');
+      return;
+    }
+    function ok() {
+      toast('已复制到剪贴板 (' + text.length + ' 字符)');
+      if (btnEl) {
+        var orig = btnEl.textContent;
+        btnEl.textContent = '已复制 ✓';
+        setTimeout(function () { btnEl.textContent = orig; }, 1400);
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok)['catch'](function () { fallbackCopy(text, ok); });
+    } else {
+      fallbackCopy(text, ok);
+    }
+  }
+
+  function fallbackCopy(text, onOk) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      onOk();
+    } catch (e) {
+      toast('复制失败，请长按日志区域手动选择复制');
+    }
+  }
+
+  function toggleFoldTerminal(boxId, btnEl) {
+    var el = $(boxId);
+    if (!el) return;
+    var secs = el.querySelectorAll('.log-sec');
+    if (!secs.length) {
+      toast('请先运行校验生成分段报告');
+      return;
+    }
+    var anyOpen = false;
+    for (var i = 0; i < secs.length; i++) {
+      if (!secs[i].classList.contains('collapsed')) { anyOpen = true; break; }
+    }
+    for (var j = 0; j < secs.length; j++) {
+      secs[j].classList.toggle('collapsed', anyOpen);
+    }
+    if (btnEl) btnEl.textContent = anyOpen ? '展开全部' : '分段折叠';
   }
 
   function currentPreset() {
@@ -1033,6 +1066,44 @@
     });
   }
 
+  /* Update the 7-segment stepped VU meter & A/B button label */
+  function syncPaVisuals() {
+    var cur = state.paGain === null || state.paGain === undefined ? 0 : Number(state.paGain);
+    if (cur > 0) state.paLastNonZero = cur;
+    var meter = $('paMeter');
+    if (meter) {
+      var segs = meter.querySelectorAll('.pa-seg');
+      for (var i = 0; i < segs.length; i++) {
+        var lv = Number(segs[i].dataset.lv);
+        segs[i].classList.toggle('active', lv <= cur);
+        segs[i].classList.toggle('armed', state.paConfirm !== null && lv === Number(state.paConfirm));
+      }
+    }
+    var ro = $('paMeterReadout');
+    if (ro) {
+      if (state.paConfirm !== null) {
+        ro.textContent = '待确认 → ' + (state.paConfirm === 0 ? '0 dB' : '+' + state.paConfirm + ' dB');
+        ro.className = 'pa-readout mono tabular warn';
+      } else if (cur === 0) {
+        ro.textContent = '0 dB · SAFE';
+        ro.className = 'pa-readout mono tabular';
+      } else if (cur <= 2) {
+        ro.textContent = '+' + cur + ' dB · MILD BOOST';
+        ro.className = 'pa-readout mono tabular warn';
+      } else {
+        ro.textContent = '+' + cur + ' dB · HIGH POWER';
+        ro.className = 'pa-readout mono tabular danger';
+      }
+    }
+    var abLbl = $('paAbLabel');
+    if (abLbl) {
+      var target = state.paLastNonZero || 1;
+      abLbl.textContent = cur === 0
+        ? ('A/B 对比：切至 +' + target + 'dB')
+        : ('A/B 对比：切回 0dB 原厂 (当前 +' + cur + 'dB)');
+    }
+  }
+
   /* smart PA pills.  the selected tier comes from state.pa_gain, i.e. from
      the persisted CONFIG (json), never from a tinymix read -- the WebUI must
      not depend on root-only mixer control reads. */
@@ -1040,12 +1111,9 @@
     var host = $('pillPa');
     if (!host) return;
     host.innerHTML = '';
+    var cur = state.paGain === null ? 0 : Number(state.paGain);
     PA_GAINS.forEach(function (g) {
       var el = document.createElement('button');
-      var cur = state.paGain === null ? 0 : Number(state.paGain);
-      /* two-step confirm: the armed tier gets the `arm` class so the user
-         can SEE that the next click on THIS pill will fire the command --
-         "点一下没反应" came from the armed state being invisible */
       var armed = state.paConfirm === g[0];
       el.className = 'pill' + (cur === g[0] ? ' sel' : '') + (armed ? ' arm' : '');
       el.dataset.g = g[0];
@@ -1066,7 +1134,9 @@
         st.textContent += '；boost ' + Number(state.paBoost) + '（非出厂满档 2，省电但削峰更早）';
       }
     }
+    syncPaVisuals();
   }
+
   /* self test: everything we need to diagnose a failure remotely */
   function renderDiag() {
     var el = $('diagBox');
@@ -1085,7 +1155,7 @@
     } else {
       L.push('最后命令    : — 还没有任何一条命令跑通');
     }
-    el.textContent = L.join('\n');
+    renderTerminal(el, L.join('\n'), false);
   }
 
   function renderStatus(s) {
@@ -1096,8 +1166,6 @@
     state.spk = s.spk_rate || 'auto';
     state.spkBits = Number(s.spk_bits) || 16;
     state.spkDsp = Number(s.spk_dsp_bits) || 16;
-    /* smart PA: null (json null / absent) = the config never touches the PA,
-       i.e. factory 0.  Any number 0..6 is what the config will apply. */
     state.paGain = (s.pa_gain === undefined || s.pa_gain === null) ? null : Number(s.pa_gain);
     state.paBoost = (s.pa_boost === undefined || s.pa_boost === null) ? null : Number(s.pa_boost);
     state.paConfirm = null;
@@ -1105,18 +1173,25 @@
     state.applied = !!s.applied;
     state.enabled = s.enabled === 0 ? 0 : 1;
 
-    /* The version appears twice on the page (hero badge + footer).  Both are
-       rendered from the same `hifi json` field, which bin/hifi reads from
-       module.prop -> version=, so bumping the module version can never leave a
-       stale number behind in the shipped HTML. */
     var verTxt = 'v' + (s.version || '?');
     $('badgeVersion').textContent = verTxt;
     var footVer = $('footVersion');
     if (footVer) footVer.textContent = verTxt;
     var badge = $('badgeApplied');
-    if (s.enabled === 0) { badge.textContent = '已还原原厂'; badge.className = 'badge off'; }
-    else if (s.applied) { badge.textContent = '补丁生效中'; badge.className = 'badge on'; }
-    else { badge.textContent = '未生效'; badge.className = 'badge off'; }
+    var led = $('heroLed');
+    if (s.enabled === 0) {
+      badge.textContent = '已还原原厂';
+      badge.className = 'badge off';
+      if (led) led.className = 'led-dot off';
+    } else if (s.applied) {
+      badge.textContent = '补丁生效中';
+      badge.className = 'badge on';
+      if (led) led.className = 'led-dot on';
+    } else {
+      badge.textContent = '未生效';
+      badge.className = 'badge off';
+      if (led) led.className = 'led-dot off';
+    }
 
     $('stApplied').textContent = s.applied ? '已挂载' : '未挂载';
     $('stMixer').textContent = fmtHz(s.mixer_rate);
@@ -1135,7 +1210,9 @@
     if (stDsp) stDsp.textContent = Number(state.spkDsp) === 16
       ? '16（关）' : state.spkDsp + '-bit（强制）';
     $('stAudio').textContent = s.audioserver || '—';
-    $('stDevice').textContent = (s.device || '—') + ' / SDK ' + (s.sdk || '—');
+    var dia = s.dialect && s.dialect !== 'unknown'
+      ? ' / ' + (s.dialect === 'qti' ? 'AIDL' : 'HIDL') : '';
+    $('stDevice').textContent = (s.device || '—') + ' / SDK ' + (s.sdk || '—') + dia;
     var stF = $('stFiles');
     if (stF) {
       var ok = Number(s.applied_files || 0), all = Number(s.total_files || 0);
@@ -1150,7 +1227,7 @@
       else stH.textContent = hOk + ' / ' + hAll + ' 个库';
     }
     $('stTarget').textContent = s.target || '未找到';
-    $('logBox').textContent = (s.log_tail || '').replace(/\n$/, '') || '—';
+    renderTerminal($('logBox'), (s.log_tail || '').replace(/\n$/, '') || '—', false);
 
     if (s.old_module) {
       banner('⚠ 检测到仍装着旧的一加 13 专用模块。两者会同时改写音频策略，建议先在管理器里卸载旧模块，再重启手机。', true);
@@ -1206,7 +1283,6 @@
     box.innerHTML = html;
   }
 
-  /* highest bit depth the DAC advertises, read from its ALSA format strings */
   function dacBits(formats) {
     var f = String(formats || '').toUpperCase();
     var m = 0;
@@ -1218,7 +1294,7 @@
 
   function busy(on, label) {
     ['btnApply', 'btnReset', 'btnDac', 'btnRefresh', 'btnDiag', 'btnDoctor', 'btnAdapt',
-     'btnSpkFlat', 'btnSpkAuto'].forEach(function (id) {
+     'btnSpkFlat', 'btnSpkAuto', 'btnPaAB', 'btnPaSafeReset'].forEach(function (id) {
       var el = $(id);
       if (el) el.disabled = !!on;
     });
@@ -1313,6 +1389,8 @@
         if (m === 'ROOT_BRIDGE_MISSING') {
           $('badgeApplied').textContent = '无 Root 桥接';
           $('badgeApplied').className = 'badge off';
+          var led = $('heroLed');
+          if (led) led.className = 'led-dot off';
         }
         banner('读取状态失败：' + explain(e), true);
         renderDiag();
@@ -1352,7 +1430,6 @@
     busy(true, '应用中…');
 
     if (p.auto) {
-      /* 自动识别：参数完全由设备端读小尾巴上报的能力决定，前端不猜 */
       return hifi('set restart ' + (state.restart ? 1 : 0))
         .then(function () { return hifi('preset auto'); })
         .then(function (r) {
@@ -1362,7 +1439,7 @@
             banner(txt || '自动识别失败：没有检测到 USB 音频设备', true);
           } else {
             toast('已自动识别并配置');
-            banner(txt, false);   /* 把识别到的能力和最终档位直接显示出来 */
+            banner(txt, false);
           }
           return refresh();
         })
@@ -1391,47 +1468,44 @@
   function runDoctor() {
     var out = $('doctorBox');
     busy(true, '校验中…');
-    if (out) out.textContent = '正在采集四层证据（配置层 / 系统层 / 能力层 / 链路层）…\n' +
-      '提示：链路层只有在【正在播放】时才看得到，请保持音乐播放。';
+    if (out) renderTerminal(out, '正在采集四层证据（配置层 / 系统层 / 能力层 / 链路层）…\n' +
+      '提示：链路层只有在【正在播放】时才看得到，请保持音乐播放。', false);
     return hifi('doctor')
       .then(function (r) {
         busy(false);
         var txt = ((r.stdout || '') + (r.stderr || '')).trim();
-        if (out) out.textContent = txt || '（没有输出）';
+        if (out) renderTerminal(out, txt || '（没有输出）', true);
         toast('校验完成');
       })
       ['catch'](function (e) {
         busy(false);
-        if (out) out.textContent = '校验失败：' + explain(e);
+        if (out) renderTerminal(out, '校验失败：' + explain(e), false);
         banner('校验失败：' + explain(e), true);
         renderDiag();
       });
   }
 
-  /* device adaptation info: the [8] half, kept in its own pane so the doctor
-     pane above always opens straight on the live output state ([7]) */
+  /* device adaptation info: the [8] half, kept in its own pane */
   function runAdapt() {
     var out = $('adaptBox');
     busy(true, '采集适配信息…');
-    if (out) out.textContent = '正在采集机型适配信息（策略文件 / 补丁基线 / 真实输出路径）…\n' +
-      '换机型或刷入无效时，把这一整段发给维护者即可定位。';
+    if (out) renderTerminal(out, '正在采集机型适配信息（策略文件 / 补丁基线 / 真实输出路径）…\n' +
+      '换机型或刷入无效时，把这一整段发给维护者即可定位。', false);
     return hifi('adapt')
       .then(function (r) {
         busy(false);
         var txt = ((r.stdout || '') + (r.stderr || '')).trim();
-        if (out) out.textContent = txt || '（没有输出）';
+        if (out) renderTerminal(out, txt || '（没有输出）', true);
         toast('适配信息已采集');
       })
       ['catch'](function (e) {
         busy(false);
-        if (out) out.textContent = '采集失败：' + explain(e);
+        if (out) renderTerminal(out, '采集失败：' + explain(e), false);
         banner('采集失败：' + explain(e), true);
         renderDiag();
       });
   }
 
-  /* speaker one-tap best practice: `hifi speaker flat|auto` (tier handled
-     entirely on the device side, WebUI only fires the subcommand) */
   function runSpeaker(tier) {
     busy(true, '优化中…');
     return hifi('speaker ' + tier)
@@ -1440,6 +1514,8 @@
         var txt = ((r.stdout || '') + (r.stderr || '')).trim();
         if (r.errno !== 0) {
           banner('扬声器' + (tier === 'auto' ? '还原' : '优化') + '失败：' + (txt || 'unknown'), true);
+        } else if (tier === 'loud') {
+          toast('扬声器响度已增强 Turbo（出厂满血Profile + 升压满载 + 数字前级补偿）');
         } else {
           toast(tier === 'auto' ? '扬声器已还原原厂' : '扬声器已优化 (44.1k / 24bit)');
         }
@@ -1452,17 +1528,6 @@
       });
   }
 
-  /* smart PA loudspeaker gain: `hifi pa gain <n>` (n=0 => `pa gain reset`).
-     Two-step confirm: the FIRST click on a tier only shows the warning (the
-     banner doubles as the confirmation line), the SECOND click on the SAME
-     tier actually fires the command.  Any other click resets the arm.
-     After the command RETURNS (same moment as the sample-rate switch) the
-     result is echoed as a toast, same component as the preset switch:
-       success  -> tier + estimated dB (WSA prints "≈ +N dB"; TFA falls back
-                   to the tier's own +N dB), reset just says restored
-       failure  -> rc != 0, or rc == 0 but the output says 不支持/未识别/被拒,
-                   shows a ⚠️ toast quoting hifi's key line (the toast has no
-                   warn style, so the prefix doubles as the warning look) */
   function paFailLine(txt) {
     var lines = String(txt || '').split('\n');
     for (var i = 0; i < lines.length; i++) {
@@ -1476,16 +1541,13 @@
   }
 
   function runPaGain(n) {
+    if (n > 0) state.paLastNonZero = n;
     if (state.paConfirm !== n) {
       state.paConfirm = n;
       var lvl = n === 0 ? '回到出厂 0（原厂功率，最安全）'
                         : '把扬声器 PA 增益提高到 +' + n + 'dB';
       banner('⚠ ' + lvl + ' —— 这会直接增大扬声器驱动功率，可能造成振膜损伤/失真/硬件损坏。' +
              '再次点击同一档确认执行；听到破音立即回出厂 0。', true);
-      /* highlight the armed tier WITHOUT rebuilding the pill host: a full
-         renderPa() replaces the button the user is mid-gesture on (and the
-         click delegate's closest() would still work, but detached listeners
-         in tests and double-tap timing on the device do not). */
       var host = $('pillPa');
       if (host) {
         Array.prototype.forEach.call(host.children, function (b) {
@@ -1494,6 +1556,7 @@
                         (g === n ? ' arm' : '');
         });
       }
+      syncPaVisuals();
       return;
     }
     state.paConfirm = null;
@@ -1511,9 +1574,6 @@
           toast('PA 增益已恢复出厂');
           banner(txt, false);
         } else {
-          /* dB 语义：档位标注 (+N dB) 是相对出厂的增量；WSA 输出的 ≈+M dB 是
-             绝对驱动电平（出厂即 ≈+20 dB）。弹窗以增量为主语言与档位标注一致，
-             绝对电平放括号里补充，避免"选 +1dB 弹 +21dB"的困惑。 */
           var dbm = txt.match(/≈\s*\+([0-9]+(?:\.[0-9]+)?)\s*dB/);
           var abs = dbm ? ('，出厂 +20dB → 现在 ≈+' + dbm[1] + 'dB') : '';
           toast('PA 增益已切到 +' + n + ' dB 档' + abs + '，扬声器已生效');
@@ -1550,9 +1610,28 @@
 
   /* ---------------------------------------------------------------- events */
   document.addEventListener('click', function (ev) {
+    /* Terminal section header click-to-collapse */
+    var secHd = ev.target.closest ? ev.target.closest('.log-sec-hd') : null;
+    if (secHd && secHd.parentNode && secHd.parentNode.classList.contains('log-sec')) {
+      secHd.parentNode.classList.toggle('collapsed');
+      return;
+    }
+    /* Copy & fold terminal buttons */
+    var copyBtn = ev.target.closest ? ev.target.closest('.btn-copy') : null;
+    if (copyBtn && copyBtn.dataset.copy) {
+      copyTerminal(copyBtn.dataset.copy, copyBtn);
+      return;
+    }
+    var foldBtn = ev.target.closest ? ev.target.closest('.btn-fold') : null;
+    if (foldBtn && foldBtn.dataset.fold) {
+      toggleFoldTerminal(foldBtn.dataset.fold, foldBtn);
+      return;
+    }
+
     var el = ev.target.closest ? ev.target.closest('.pill') : null;
     if (!el) return;
     var host = el.parentNode;
+    if (!host) return;
     if (host.id === 'pillPreset') { applyPreset(el.dataset.p); return; }
     if (host.id === 'pillMax') state.max = Number(el.dataset.v);
     else if (host.id === 'pillMixer') state.mixer = Number(el.dataset.v);
@@ -1581,6 +1660,29 @@
     })['catch'](function (e) { busy(false); banner('检测失败：' + explain(e), true); renderDiag(); });
   });
 
+  /* Smart PA Quick A/B Audition & Instant 0dB Safe Reset */
+  var btnPaSafe = $('btnPaSafeReset');
+  if (btnPaSafe) {
+    btnPaSafe.addEventListener('click', function () {
+      state.paConfirm = 0; /* bypass two-step wait on emergency reset */
+      runPaGain(0);
+    });
+  }
+  var btnPaAB = $('btnPaAB');
+  if (btnPaAB) {
+    btnPaAB.addEventListener('click', function () {
+      var cur = state.paGain === null ? 0 : Number(state.paGain);
+      if (cur > 0) {
+        state.paLastNonZero = cur;
+        state.paConfirm = 0; /* instant drop to 0dB reference for A/B listening */
+        runPaGain(0);
+      } else {
+        var target = state.paLastNonZero || 1;
+        runPaGain(target);
+      }
+    });
+  }
+
   /* force a full re-probe of the root bridge and of the module directory */
   var btnDiag = $('btnDiag');
   if (btnDiag) {
@@ -1599,6 +1701,8 @@
   if (btnDoctor) btnDoctor.addEventListener('click', runDoctor);
   var btnAdapt = $('btnAdapt');
   if (btnAdapt) btnAdapt.addEventListener('click', runAdapt);
+  var btnSpkLoud = $('btnSpkLoud');
+  if (btnSpkLoud) btnSpkLoud.addEventListener('click', function () { runSpeaker('loud'); });
   var btnSpkFlat = $('btnSpkFlat');
   if (btnSpkFlat) btnSpkFlat.addEventListener('click', function () { runSpeaker('flat'); });
   var btnSpkAuto = $('btnSpkAuto');

@@ -1,17 +1,102 @@
 # HiFi SRC Bypass · 全机型 USB 直通
 
-![HiFi SRC Bypass v2.0.0](out/hero-v2.0.0.svg)
+<p align="center">
+  <img src="out/hero-v2.0.2.png" alt="HiFi SRC Bypass v2.0.2 · 全机型 Android 音频直通 / SRC 绕过" width="100%">
+</p>
+
+<p align="center">
+  <a href="#-变更日志changelog"><b>🆕 更新日志</b></a> ·
+  <a href="#-已验证机型"><b>✅ 已验证机型</b></a> ·
+  <a href="#1-它解决了什么为什么改完-xml-还是-96-khz"><b>🔧 原理（四层上限）</b></a> ·
+  <a href="#2-实测结果"><b>📊 实测结果</b></a> ·
+  <a href="#3-档位位深与预设"><b>🎚 档位与预设</b></a> ·
+  <a href="#4-安装"><b>📦 安装</b></a> ·
+  <a href="#5-使用"><b>💻 使用</b></a> ·
+  <a href="#6-文件结构"><b>🗂 文件结构</b></a> ·
+  <a href="#7-安全性与可逆性"><b>🛡 安全性</b></a> ·
+  <a href="#8-已知边界"><b>⚠️ 已知边界</b></a> ·
+  <a href="#9-致谢与参考"><b>🙏 致谢</b></a> ·
+  <a href="https://github.com/lizi600jin/hifi-src-bypass/releases/latest"><b>⬇️ 下载</b></a>
+</p>
+
+<details>
+<summary><b>📖 完整目录（点开，含全部子章节）</b></summary>
+
+- [📋 变更日志（Changelog）](#-变更日志changelog)
+  - [v2.0.2 · 音量曲线解锁 / 外放响度重做 / 内置声卡自检](#v202--音量曲线解锁--外放响度重做--内置声卡自检)
+  - [v2.0.0 · Smart PA 功率层 / P0 热修](#v200--smart-pa-功率层--p0-热修)
+  - [v1.9.2 · 稳定线](#v192--稳定线p0-安全网--webui-背景图系统)
+  - [v1.9.0 · 扬声器档位 / 位深](#v190--2026-09-20--扬声器档位--位深)
+  - [v1.8.2 / v1.8.1 / v1.8 / v1.6 · 历史](#v182--v181--v18--v16--历史)
+- [✅ 已验证机型](#-已验证机型)
+- [1. 它解决了什么：为什么「改完 XML 还是 96 kHz」](#1-它解决了什么为什么改完-xml-还是-96-khz)
+  - [1.1 第一层：策略 XML](#11-第一层策略-xml)
+  - [1.2 第二层：USB HAL 库的采样率表 ★](#12-第二层usb-hal-库的采样率表-)
+  - [1.3 第三层：厂商 HiFi 通道的采样率 ★](#13-第三层厂商-hifi-通道的采样率v18-)
+  - [1.4 第四层：音量曲线的末档衰减 ★](#14-第四层音量曲线的末档衰减v202-)
+  - [1.5 为什么有的机器「改 XML 完全没用」](#15-为什么有的机器改-xml-完全没用)
+- [2. 实测结果](#2-实测结果)
+  - [2.0 与「App 独占 USB」的对比（如实版）](#20-与app-独占-usb的对比如实版)
+  - [2.0b 混音率的提升（免 SRC 的机制）](#20b-混音率的提升免-src-的机制)
+  - [2.0c 混音率 44100 的机型边界](#20c-混音率-44100-的机型边界一加13-真机定位--v200-适配版修复)
+  - [2.1 各厂商兼容性一览](#21-各厂商兼容性一览)
+- [3. 档位、位深与预设](#3-档位位深与预设)
+- [4. 安装](#4-安装)
+- [5. 使用](#5-使用)
+  - [WebUI](#webui)
+  - [命令行](#命令行)
+- [6. 文件结构](#6-文件结构)
+  - [运行时目录（卸载时整体删除）](#运行时目录卸载时整体删除)
+- [7. 安全性与可逆性](#7-安全性与可逆性)
+- [8. 已知边界](#8-已知边界)
+  - [遇到不支持的机型怎么办](#遇到不支持的机型怎么办)
+- [9. 致谢与参考](#9-致谢与参考)
+  - [USB Samplerate Unlocker ★ 第二层的来源](#usb-samplerate-unlocker--第二层的来源)
+  - [Hydro-Br-leur —— 一加 13T / ColorOS 16 解锁 192 kHz](#hydro-br-leur--一加-13t--coloros-16-解锁-192-khz-usb-独占模块)
+  - [USB_SampleRate_Changer_WebUI](#usb_samplerate_changer_webui)
+  - [Android AOSP（官方文档与源码）](#android-aosp官方文档与源码)
+  - [Magisk / KernelSU / APatch](#magisk--kernelsu--apatch)
+
+</details>
+
+---
 
 > 全机型通用的 Android 模块：**USB 小尾巴 / 有线耳机高解析直通（SRC 绕过）**。
-> **三层上限一起解** —— ① 音频策略 XML（框架允许分发什么）② USB HAL 库里的采样率常量表（DAC 实际能开到多少）
-> ③ **厂商 HiFi 通道的采样率**（接小尾巴后 USB 音频真正走的那条路，v1.8 新增）。
+> **四处上限一起解** —— ① 音频策略 XML（框架允许分发什么）② USB HAL 库里的采样率常量表（DAC 实际能开到多少）
+> ③ **厂商 HiFi 通道的采样率**（接小尾巴后 USB 音频真正走的那条路，v1.8 新增）
+> ④ **音量曲线表的扬声器末档衰减**（框架给「最大音量」钉的天花板，v2.0.2 新增）。
 > 直通上限 96k / 192k / 384k 可选、位深 16 / 24 / 32 bit 可切、
 > 全局混音率与 HiFi 通道率均可对齐音源 —— **对得上的那条路就是比特完美**。
 > 原厂文件零改写（systemless 绑定挂载），一键还原、卸载自动清理。
 >
-> **📦 当前发布包**：`hifi-src-bypass-v2.0.0-mtk-classnative-speakerfix.zip` —— 包名即适配声明：
+> **📦 当前发布包**：`hifi-src-bypass-v2.0.2-mtk-classnative-speakerfix.zip` —— 包名即适配声明：
 > **MTK 类原生已实测适配**（Redmi Note 11T Pro / 天玑 8100 全链验证）+
 > **一加13 扬声器电流声已定位并加警示防护**（QTI AIDL 时钟粒度错配，见 §2.0c）。
+
+> ### 🆕 v2.0.2 新增：音量曲线解锁 / 外放响度重做 / 内置声卡自检
+>
+> **① 音量曲线末档解锁**（`hifi set volunlock 1`，默认关闭）
+> 原厂给「最大音量」留了固定的余量：音量键按到顶，曲线最后一个点仍然扣着 −3 dB。
+> 打开后把**扬声器 + 音乐流**曲线最后 3 档的衰减改成 0 dB，听筒 / 有线 / 蓝牙 / 通话 / 闹钟一律不动。
+> 等长原位替换，文件长度一个字节不变。默认不开，行为与旧版一致。
+>
+> **② 外放响度重做**（`hifi speaker loud`）
+> 旧版往上推功放增益，真机实测发现这条路是空的：TFA9874 出厂 `G_DEFAULT` 在固件里就等于满载档，
+> 推到 +6 dB 与原厂差不到 0.5 dB。新版改用 Qualcomm 硬件 **IIR0 Band1 二阶 160 Hz 高通**，
+> 砍掉小扬声器发不出的超低频，振膜行程腾出来交给中高频，硬件功率一点没加。
+> 系数按本机实际采样率现场算 Q30 定点，与内置基准表逐位比对通过才写；路由没接通就整个跳过。
+>
+> **③ 自检能报内置声卡的真实输出了**
+> 没插小尾巴时，`hifi doctor` 现在会说出扬声器 / 3.5mm 耳机口实际的采样率与位深，
+> 例：`扬声器 (deep_buffer) → 24bit @ 48000 Hz`。以前这一格只会写「在扬声器上播放」。
+>
+> **④ 安装冲突闸门**
+> 刷入前扫已装模块。有别的模块落到同一批音频文件上，安装直接中止并列出是哪个模块、抢了哪个文件，
+> 一个文件都不写。扫描不完整也按拒绝处理。
+>
+> **⑤ WebUI 整套重做**
+> Hero 四宫格状态看板、三大工作区拆开、Smart PA 七段功率电平表、A/B 试听对比、
+> 一键回 0 dB、底部悬浮操作栏、诊断终端行号与章节折叠。全部事件驱动，无常驻定时器。
 
 > ### 🆕 v2.0.0 新增「Smart PA 功率层」（实验 · 一加13 真机诊断驱动全面适配）
 >
@@ -87,6 +172,16 @@
 
 ## 📋 变更日志（Changelog）
 
+### v2.0.2 · 音量曲线解锁 / 外放响度重做 / 内置声卡自检
+
+- **第四层：音量曲线末档解锁**（`hifi set volunlock 1`）：把 `audio_policy_volumes.xml` / `default_volume_tables.xml` 里**扬声器 + 音乐流**曲线最后 3 档的衰减改成 0 dB，解除框架给「最大音量」钉的天花板。只动这一条曲线与它引用的 `DEFAULT_DEVICE_CATEGORY_SPEAKER_VOLUME_CURVE` 表；听筒 / 有线 / 蓝牙 / 闹钟 / 铃声 / 通话逐字节原样拷贝。等长原位替换，`check_volume.awk` 逐块字节比对验证。默认关闭，不开就是原厂曲线。新增 volume 测试阶段 86 断言
+- **扬声器响度重做**（`hifi speaker loud`）：放弃推功放增益（真机实测 TFA9874 出厂 `G_DEFAULT` 在固件里等于满载档 `G_6_DB`，推 +6 dB 与原厂差 < 0.5 dB），改用 Qualcomm 硬件 `IIR0 Band1` 二阶 Butterworth 高通，截止 160 Hz，砍掉小扬声器发不出的超低频、释放振膜行程、让 DSP 限幅器不再被无效低频误触发。系数按本机实际采样率现场算 Q30 定点，48k / 44.1k 与内置基准表逐位比对通过才写，其余采样率走稳定性与幅频自检；先关使能再写系数再使能避免换系数爆音；IIR 路由出厂未接通则整个跳过，绝不盲写。`hifi speaker auto` 一键还原（关使能 + 系数清零 + 数字音量回 84）
+- **修复 `_pa_dump` 的 `Argument list too long`**：约 250 KB 的完整 tinymix 转储经 `printf` 输出时走 execve，Android 的 `printf` 是 `/system/bin/printf` 外部程序，整个转储作为单个 argv 元素超过 `ARG_MAX`，报错且 stdout 全空。赋值本身成功（字符串长度正常），下游全都误判「本机没有这个控件」—— IIR 探测报无控件、PA 后端识别失败、WSA 多芯片识别不到。改用 mksh 内建 `echo`，不经过 execve
+- **自检覆盖内置声卡**：`hifi doctor` 在未插 USB DAC 时下钻 `dumpsys media.audio_policy` / `media.audio_flinger`，解析 `SPEAKER` / `WIRED_HEADSET` / `WIRED_HEADPHONE` / `EARPIECE` 活跃输出通道的 IOProfile、格式与采样率，速览直接给出「扬声器 (deep_buffer) → 24bit @ 48000 Hz」。以前这一格只写「在扬声器上播放」
+- **安装冲突闸门**：刷入前扫描已装模块，只要有别的模块落到同一批文件上（音频策略 XML / `libalsautils*.so` / `mixer_paths` / `audio_effects`）或模块名命中已知音频类模块，安装中止并列出模块与文件，**一个文件都不写**。扫描不完整按拒绝处理（宁可停下也不带病装）
+- **WebUI 整套重做**：Hero 四宫格状态看板（补丁挂载 / 全局混音率 / 直通上限 / 直通位深，等宽数字不抖）；三大工作区拆开（核心直通 / 扬声器与功放 / 底层证据终端），长篇说明收进可折叠抽屉；Smart PA 七段功率电平表（0 dB 绿 → +1~2 暖黄 → +3~4 琥珀 → +5~6 危险红，二次确认态呼吸提示）；A/B 试听对比 + 一键回 0 dB；底部悬浮操作栏（适配安全区，任意位置都能直接点应用）；诊断终端纯 CSS 行号（复制出去不带行号）、关键状态着色、章节折叠、双通道复制。全部事件驱动无常驻定时器，动画只碰合成层属性，支持 `prefers-reduced-motion`
+- **其他修复**：PA 档位切换提示文案（成功报档位与 dB，不支持或失败给 ⚠️）；`restore` 遇占用文件走 lazy-umount 兜底，不再残留挂载；`service.sh` 与 `post-fs-data.sh` 的控制器调用全部包超时，冲突模块拖挂时最坏约 2 分钟完成降级
+
 ### v2.0.0 · Smart PA 功率层 / P0 热修
 
 - **v2.0.0 适配版（`mtk-classnative-speakerfix`）**：一加13 扬声器「噗噗」电流声根因闭环 —— QTI AIDL 方言 DSP 混音通路锁 48k 时钟粒度，44100 混音率产生 192 帧周期切流错配（真机 A/B 排他验证，MTK/HIDL 无此问题）。固化三处警示（apply / status / doctor ⑧ 混音率健康，含 HAL frame count 实跑解析）：**只警示不阻断**，MTK/HIDL 机型 44100 照常零提示；发布包名更新为 `hifi-src-bypass-v2.0.0-mtk-classnative-speakerfix.zip` 声明适配状态。新增 controller 场景 13 断言，五阶段测试全绿
@@ -129,10 +224,15 @@
 | 机型 | SoC | 系统 | 方言 | 模块版本 | 结果 |
 |---|---|---|---|---|---|
 | Redmi K20 Pro (`raphael`) | SM8150 | Android 16 | QTI HIDL | v2.0.0 | ✅ 三层熔断 + 恢复路径全过（P0 真机验证）；`hifi doctor` 干净；版本史见下方 v1.9.0 数据点 |
-| Redmi Note 11T Pro (`xaga`) | MT6895 (天玑 8100) | Android 16 类原生 (BP4A.251205.006) | AOSP HIDL | v2.0.0 | ✅ **首个 MTK + 类原生真机**：1 策略 + 1 HAL 挂载（libalsautils 表 96k→384k）；MIXER_RATE=192000 实测 AudioFlinger 混音线程 192000 Hz；spk/hifirate/ceiling/bits 全档位生效可回退；P0 安全网 prepare-only→激活正常（boot 111s）；doctor/report/adapt/restore 全过。无 tinymix，PA 降级 unknown（预期）。无小尾巴，USB 听感未测 |
+| Redmi Note 11T Pro (`xaga`) | MT6895 (天玑 8100) | Android 16 类原生 (BP4A.251205.006) | AOSP HIDL | v2.0.2 | ✅ **MTK + 类原生真机**：1 策略 + 1 HAL 挂载（libalsautils 表 96k→384k）；MIXER_RATE=192000 实测 AudioFlinger 混音线程 192000 Hz；spk/hifirate/ceiling/bits 全档位生效可回退；P0 安全网 prepare-only→激活正常（boot 111s）；doctor/report/adapt/restore 全过。无 tinymix，PA 降级 unknown（预期）。无小尾巴，USB 听感未测 |
 | OnePlus 13 (`OP5D0DL1`) | SM8750 | Android 16 | QTI AIDL | v2.0.0 | ✅ 覆盖安装+重启自愈 10/10 策略 + 4/4 HAL 挂载；**PA WSA884x 后端 gain/vi 真机全链通过（gain 2 → 80 → reset 84）**；restore 零残留；doctor rc=0；版本史见下方 v1.9.0 数据点 |
 | vivo PD2408 (`V2408A`) | SM8750 (sun) | OriginOS, Android 16 (SDK 36) | QTI AIDL | v1.9.0 | ✅ 2 策略 + 4 HAL 挂载，boot 干净（2026-09-21 社区回传） |
 
+> **v2.0.2 新增验证**：Redmi Note 11T Pro 的 **3.5mm 耳机口**链路 —— `Wired Headset` / `Wired Headphones`
+> 端口上限补到 384000 Hz、位深补到 `PCM_16_LE / PCM_24_LE / PCM_32_LE`；
+> 自检在未插小尾巴、直插 3.5mm 耳机播放时输出 `3.5mm耳机 (primary output) → 24bit @ 48000 Hz`；
+> 扬声器播放时输出 `扬声器 (deep_buffer) → 24bit @ 48000 Hz`。
+>
 > **v2.0.0 真机测试环境**：一加 13（OnePlus 13）、红米 K20 Pro（Redmi K20 Pro，Android 16 移植澎湃 OS HyperOS）、红米 Note 11T Pro（Redmi Note 11T Pro，Android 16 类原生，MTK 天玑 8100）；
 > 小尾巴为 CX31993（Conexant）+ MAX97220（Maxim）方案与 MOONDROP FreeDSP Mini；
 > 耳机为 MOONDROP Aria 2（真红限定版）与 MOONDROP 竹 II（CHU II）。
@@ -146,13 +246,14 @@
 
 ## 1. 它解决了什么：为什么「改完 XML 还是 96 kHz」
 
-Android 上其实存在**两个互相独立的上限**，绝大多数教程只处理了上面那个。
+Android 的音频链路上有**好几处互相独立的上限**，绝大多数教程只处理了其中一处。
 
 | 层 | 在哪 | 决定了什么 | 本模块怎么改 |
 |---|---|---|---|
 | ① 框架层 | `*audio_policy_configuration*.xml` / `audio_module_config_primary.xml` 里的 `samplingRates` | AudioPolicyManager 允许**分发**的上限 | 规则化改写 profile（第 1.1 节） |
 | ② **硬件层** | `/vendor/lib{,64}/libalsautils{,v2}.so` 里一张 **52 字节常量表** | USB HAL 实际**打开**的上限 —— **DAC 真正看到的** | 等长原位重排这张表（第 1.2 节）★ |
 | ③ **HiFi 通道层**（v1.8 ★） | 策略里**空声明的动态 mixPort**（如 `hifi_playback`） | 接上小尾巴后，USB 音频**真正播放的那条路**的采样率 —— 它原厂是「动态」的，会被钉在 **DAC 自报的最大率**上 | 给它写**静态 profile**，把这条通道锁到**你音源的采样率**（第 1.3 节） |
+| ④ **音量曲线层**（v2.0.2 ★） | `audio_policy_volumes.xml` / `default_volume_tables.xml` 里 `DEVICE_CATEGORY_SPEAKER` + `AUDIO_STREAM_MUSIC` 的 `<point>` 列表 | 框架眼中的「最大音量」 = 曲线末档的衰减值。原厂末档常留 −3 dB 余量，音量键按到顶也补不回来 | 把末 3 档衰减改成 0 dB（`hifi set volunlock 1`，等长原位替换） |
 
 > **第 ③ 层为什么关键**：接上小尾巴后实测（红米 K20 Pro / 一加 13 一致），USB 音频**根本不走
 > `deep_buffer`**（它挂着 USB 设备却处于 Standby），走的是厂商 HiFi 专用端口；而该端口原厂是
@@ -219,7 +320,39 @@ AudioPolicyManager 就会按静态声明重建端口。真机验证（红米 K20
 垃圾采样率并拒载策略，**手机直接无声**）。模块按文件自身推断。电话通路 `voip_rx` 一律不碰；
 以及一个块扫描 bug —— 自闭合端口（`<mixPort … />`）会把下一个端口整块吞掉并静默跳过。
 
-### 1.4 为什么有的机器「改 XML 完全没用」
+### 1.4 第四层：音量曲线的末档衰减（v2.0.2 ★）
+
+前三种上限都在采样率和位深上，还有一处跟它们完全无关：**框架眼中的「最大音量」是多少**。
+
+AOSP 把每个（流类型 × 设备类别）的响度写成一条曲线：
+
+```xml
+<volume stream="AUDIO_STREAM_MUSIC" deviceCategory="DEVICE_CATEGORY_SPEAKER">
+    <point>0,-2400</point>      <!-- 最小档：−24 dB -->
+    ...
+    <point>99,-350</point>      <!-- −3.5 dB -->
+    <point>100,-300</point>     <!-- 末档：还留着 −3 dB -->
+</volume>
+```
+
+第二个数字是**从满刻度扣掉多少**（毫贝），单位是 mB。音量键沿着 index 往上爬，爬到最后一档仍然差 3 dB。
+按到头也就这样了，后面没有第 101 档。用户按到顶，硬件拿到的已经不是满幅信号。
+
+`hifi set volunlock 1` 做的事就是把这个尾巴改成 0：
+
+```
+<point>100,-300</point>      18 字节
+<point>100,0   </point>      18 字节   ← 实际输出，宽度补齐，长度不变
+```
+
+范围卡死在这一条曲线上：`AUDIO_STREAM_MUSIC` + `DEVICE_CATEGORY_SPEAKER`，外加
+`default_volume_tables.xml` 里 `DEFAULT_DEVICE_CATEGORY_SPEAKER_VOLUME_CURVE` 的引用表。
+听筒、有线耳机、蓝牙、HDMI、通话、闹钟、铃声，以及各种 `DEFAULT_*_TO_*_VOLUME_CURVE` 转换表全部
+逐字节原样拷贝 —— `check_volume.awk` 做的是逐块字节比对，不是「看起来没改」。
+
+默认值是 `VOL_UNLOCK=0`，也就是完全不碰音量曲线。不开这一项，行为与 v2.0.0 一致。
+
+### 1.5 为什么有的机器「改 XML 完全没用」
 
 本模块在真机上确认了两种会让第一层彻底失效的形态：
 
@@ -253,13 +386,13 @@ v1.8 起不再只验证「上限解锁」，而是逐 App 实测**每条音源�
 | 链路级数 | **最短**（App → UAC → DAC） | 多两级（AudioFlinger → Audio HAL → USB HAL） |
 | 重采样 | 无 | 锁定率上**无**；其余采样率无损上采样 |
 | 格式转换 | 无 | float→int（≤24 bit 无损）；部分 HAL 直收 FLOAT |
-| 适用 App | **极少数**（海贝 / UAPP / Poweramp / Neutron） | **全部** App |
+| 适用 App | **少数**（海贝 / UAPP / Poweramp / Neutron） | **全部** App |
 | 与系统共存 | 独占期间通知 / 其他声音全断 | 正常混音、切歌、切设备 |
 | 规格上限 | 取决于 App 自带驱动 | 系统统一（384k / 32bit 已解锁） |
 
-**结论必须如实**：「比独占更干净」不成立 —— 独占链路物理上最短。准确的说法是：
+**结论**：「比独占更干净」不成立 —— 独占链路物理上最短。准确的说法是：
 **在你锁定的采样率上，这条路径与独占等价干净**（实测 `线程采样率 == 音源采样率`，零重采样），
-而它的真实优势是 ① 让**没有独占功能的 App**（网易云 / QQ / 汽水 / 酷狗）走上等价干净的路径；
+而它的真实优势是 ① 让**没有独占功能的 App**走上等价干净的路径；
 ② 与系统共存（独占是「独我」模式）；③ 规格由系统统一管理，不受单个 App 驱动质量限制。
 
 ### 2.0b 混音率的提升（免 SRC 的机制）
@@ -329,6 +462,8 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 | **HiFi 通道率 `HIFI_RATE`（v1.8 新增）** | auto / 44100 / 48000 / 96000 / 176400 / 192000 / 352800 / 384000 | **接小尾巴后 USB 音频真正走的通道**。`auto` = 原厂动态（跟随 DAC 最大率）；填一个数即锁定该率 —— **锁定率上的内容比特完美，其余采样率被无损上采样，永不有损下采样** |
 | **扬声器采样率 `SPK_RATE`（v1.9 新增）** | auto / 44100 / 48000 / 96000 / 192000 / 384000 | 手机**扬声器 / 听筒**输出端口的采样率。`auto` = 原厂不动；填一个数即把扬声器端口钉死为该率 —— 与全局混音率是两个正交旋钮（混音器归 `MIXER_RATE`，扬声器归它），扬声器回放 44.1k / 48k 曲库同样可免 SRC。**同样永不往下选**。**全机型可用**：不依赖 USB HAL 库 / hifi_playback 通道，只读策略 XML；MTK 天玑 / Pixel Tensor 也能用（策略 XML 标准）；唯一硬阻断 HarmonyOS NEXT |
 | **扬声器位深 `SPK_BITS`（v1.9 新增）** | 16 / 24 / 32 | 扬声器 / 听筒端口允许的位深上限。16 = 保持原厂（默认，最保守）；24 / 32 = 补齐到该档位（内置 DAC 多为 24bit 能力，原厂常只声明 16bit）。设高了可能扬声器无声。**覆盖范围同上** |
+| **音量曲线解锁 `VOL_UNLOCK`（v2.0.2 新增）** | 0 / 1 | `hifi set volunlock 1`。把**扬声器 + 音乐流**音量曲线最后 3 档的衰减改成 0 dB，解开框架给「最大音量」钉的天花板（原厂末档常留 −3 dB 余量）。默认 `0`，听筒 / 有线 / 蓝牙 / 通话 / 闹钟曲线一律不动；等长原位替换，文件长度不变 |
+| **外放响度 `SPK_LOUD`（v2.0.2 新增）** | 0 / 1 / 2 | `hifi speaker loud` 置 1，`hifi set speloud 2` 置 2。`0` = 不动 codec；`1` = 只做硬件 IIR 二阶 160 Hz 高通（砍超低频、释放振膜行程）；`2` = 高通 + 允许数字前端衰减索引压到 72（+6 dB 上限）。依赖 Qualcomm IIR 架构，控件缺失或路由未接通则自动跳过 |
 
 一键预设：`auto`（读小尾巴上报能力自动配）/ `384k` / `192k` / `96k` / `44k` / `192mix` / `384mix`。
 
@@ -341,8 +476,8 @@ AudioOut_55 (hifi_playback) @192000 <- 网易云 FLOAT@192000 => 零重采样 �
 
 ## 4. 安装
 
-1. 下载本仓库发布包 [`hifi-src-bypass-v2.0.0-mtk-classnative-speakerfix.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/tag/v2.0.0)
-   （包名声明适配范围：MTK 类原生已适配 + 一加13 扬声器电流声已修复；版本号仍为 2.0.0）
+1. 下载发布包 [`hifi-src-bypass-v2.0.2-mtk-classnative-speakerfix.zip`](https://github.com/lizi600jin/hifi-src-bypass/releases/download/v2.0.2/hifi-src-bypass-v2.0.2-mtk-classnative-speakerfix.zip)（或到 [Releases 页](https://github.com/lizi600jin/hifi-src-bypass/releases/latest) 下载）
+   （包名声明适配范围：MTK 类原生已适配 + 一加13 扬声器电流声已修复）
 2. Magisk / KernelSU / APatch → 从本地安装 → 选择 zip
 3. 重启
 4. 打开模块页 → **WebUI**（KernelSU / APatch 支持；Magisk 用操作按钮或终端）
@@ -370,6 +505,10 @@ sh $H dac               # 探测 USB 小尾巴
 sh $H pa status         # Smart PA：型号 / 增益 / boost / VI 反馈 / 保护状态
 sh $H pa gain 2         # PA 增益档（0..6，+1dB 起步）
 sh $H pa reset          # PA 恢复出厂
+sh $H speaker loud      # 外放响度：IIR 160Hz 高通（SPK_LOUD=1）+ 端口钉率 24bit
+sh $H set speloud 2     # 额外允许数字前端衰减索引压到 72（+6dB 上限）
+sh $H set volunlock 1   # 音量曲线末档解锁：扬声器+音乐流最后 3 档改 0 dB
+sh $H speaker auto      # 外放全部还原（IIR 关+清零、数字音量回 84、SPK_LOUD=0）
 sh $H verify            # 检查实际生效的配置与 audioserver 视角
 sh $H doctor            # 深度体检：四层证据（配置 / audioserver / 链路 / 内核）
 sh $H report [file]     # 生成一份可读诊断快照（默认 /data/local/tmp/，adb pull 即可取）
@@ -395,14 +534,18 @@ post-fs-data.sh             开机早期挂载（最关键时机）+ 写诊断�
 service.sh                  开机后逐目标校验，真丢了才补挂
 action.sh                   管理器操作按钮 = 开/关开关
 uninstall.sh                卸载：跨命名空间解除绑定 + 清空全部残留
-bin/hifi                    控制器（status/files/hal/dac/pa/verify/doctor/report/
+bin/hifi                    控制器（status/files/hal/dac/pa/speaker/verify/doctor/report/
                             rates/set/preset/apply/restore/missing/applied/adapt）
 bin/probe192.sh             深度校验：四层证据 + 结论（= hifi doctor）
+bin/tinymix_min             自带的 tinymix 精简替代（ROM 无 tinymix 时才用）
 payload/patch_policy.awk    规则化策略改写器（方言自动识别）
 payload/check_policy.awk    结构校验器（端口/路由有非预期变化就拒绝挂载）
 payload/patch_hal.sh        USB HAL 采样率表的等长原位重排器
+payload/patch_volume.awk    音量曲线末档解锁器（等长原位，只动扬声器+音乐流）
+payload/check_volume.awk    音量曲线逐块字节比对校验器
+payload/tinyalsa_min.c      tinymix_min 的源码
 webroot/                    KernelSU / APatch WebUI
-dist/                       打好的可刷入 zip
+out/                        README 标题图（hero-v2.0.2.svg + 同名 png，GitHub 渲染用 png）
 ```
 
 ### 运行时目录（卸载时整体删除）
@@ -431,11 +574,15 @@ dist/                       打好的可刷入 zip
   busy 文件（被 audioserver mmap）由 lazy umount 兜底，零残留
 - 策略改写**先过结构校验**，HAL 表改写**先过四项复核**，任何一项不过就放弃而不是「先挂上再说」
 - **Smart PA 永不碰危险控件**：保护算法状态 / Mute / 校准 / Profile 换挡为硬编码拒绝名单；只读后端绝不盲写
+- **音量曲线只动一条**：`volunlock` 只改扬声器 + 音乐流的曲线与它引用的那张表；听筒 / 有线 / 蓝牙 / 通话 / 闹钟 / 铃声，以及各种转换表都是逐字节原样拷贝，`check_volume.awk` 逐块比对
+- **外放响度不堆硬件功率**：`speaker loud` 走的是砍超低频释放振膜行程，不推功放增益；IIR 系数先与内置基准表逐位比对，算不准或路由没接通就一个字都不写
+- **安装冲突闸门**：有别的模块落到同一批音频文件上时安装直接中止，**一个文件都不写**；扫描拿不到模块列表也按拒绝处理
 - 判定「是否生效」**分两层**：XML 认文本标记，`.so` 认采样率表 —— 因此开机自检不会误判、
   也不会因为一个 `grep` 不到标记就无限重挂
 - 用户把某一层关掉后，**已经被挂上的那一层会被主动卸载**，不留悬挂挂载
 - 目标不在列表里了（ROM 升级、层被关闭）也会被卸载
 - **开机安全网**：冲突模块把控制器拖挂时逐处 10–30s 超时降级，最坏约 2 分钟内完成退场，不卡死引导
+- **自检只读不写**：`hifi doctor` / `report` / `adapt` 全程只读，不产生任何挂载或配置文件
 
 ---
 
@@ -449,6 +596,11 @@ dist/                       打好的可刷入 zip
 - **上限高于 DAC 真实能力会导致无声**：请用 `hifi preset auto` 或 WebUI 的小尾巴卡片对齐档位
 - **Smart PA 档位按后端能力分**：TFA9874 / Qualcomm WSA 机型可调，awinic / Cirrus / MTK 只读；
   每侧独立档位受 ROM 控件层限制（ROM 只给一套对称音量入口时无法实现，等值联动已覆盖该形态）
+- **`speaker loud` 依赖 Qualcomm IIR 架构**：ROM 里没有 `IIR0 Enable Band1` / `IIR0 Band1` 控件，
+  或者 IIR 输入路由（`IIR0 INP0 MUX` 等）出厂没接通时，整个高通会被跳过并说明原因
+- **`volunlock` 只覆盖扬声器 + 音乐流**：听筒、有线耳机、蓝牙、通话、闹钟、铃声的音量曲线一律不动。
+  想要更大声请先确认不是音源本身的电平问题 —— 曲线末档已经是 0 dB 时，这一项没有额外收益
+- **扬声器位深设高了可能无声**：`SPK_BITS` 24/32 超出内置 DAC 实际能力时端口打不开，用 `hifi speaker auto` 回退
 
 ### 遇到不支持的机型怎么办
 

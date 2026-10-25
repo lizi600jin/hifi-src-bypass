@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # HiFi SRC Bypass - deep verification (sampling rate + bit depth)
-#                                        probe192.sh           v2.0.0
+#                                        probe192.sh           v2.0.2
 #
 #   usage A (module installed):
 #     su -c "sh /data/adb/modules/hifi_src_bypass/bin/probe192.sh"
@@ -1162,6 +1162,56 @@ EOF
     OUT_RATE="$(printf '%s\n' "$out_lines" | sed -n 's/.*AUDIO_FORMAT_[A-Z0-9_]*; *\([0-9]*\).*/\1/p' | tail -n1)"
     OUT_BITS="$(bits_of_fmt "$OUT_FMT")"
     [ -n "$OUT_CHAN" ] && OUT_CHAN="$(chan_of "$OUT_CHAN")"
+  else
+    # 无 USB 小尾巴或未激活 USB 时：从 dumpsys 抓取扬声器 / 3.5mm 耳机活跃通道的真实格式与采样率
+    # 无 USB 小尾巴时：从 dumpsys 抓取扬声器 / 3.5mm 耳机活跃通道的真实格式与采样率
+    built_lines="$(awk '
+      /^[[:space:]]*Outputs \([0-9]+\)/ { o=1; next }
+      o && /^[[:space:]]*Inputs \([0-9]+\)/ { o=0 }
+      o && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/ {
+        if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_(SPEAKER|EARPIECE|WIRED)/) {
+          if (rec ~ /Global active count: [1-9]/) { print rec; exit }
+        }
+        rec=$0; next
+      }
+      o && rec != "" { rec = rec "\n" $0 }
+      END {
+        if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_(SPEAKER|EARPIECE|WIRED)/ && rec ~ /Global active count: [1-9]/) {
+          print rec
+        }
+      }
+    ' "$D2" 2>/dev/null)"
+    if [ -z "$built_lines" ]; then
+      built_lines="$(awk '
+        /^[[:space:]]*Outputs \([0-9]+\)/ { o=1; next }
+        o && /^[[:space:]]*Inputs \([0-9]+\)/ { o=0 }
+        o && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/ {
+          if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_(SPEAKER|EARPIECE|WIRED)/ && rec ~ /IOProfile name:(primary output|deep_buffer)/) {
+            print rec; exit
+          }
+          rec=$0; next
+        }
+        o && rec != "" { rec = rec "\n" $0 }
+        END {
+          if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_(SPEAKER|EARPIECE|WIRED)/ && rec ~ /IOProfile name:(primary output|deep_buffer)/) {
+            print rec
+          }
+        }
+      ' "$D2" 2>/dev/null)"
+    fi
+    if [ -n "$built_lines" ]; then
+      BUILT_CHAN="$(printf '%s\n' "$built_lines" | sed -n 's/.*IOProfile *name: *\([^;]*\).*/\1/p' | head -n1)"
+      BUILT_FMT="$(printf '%s\n' "$built_lines" | sed -n 's/.*\(AUDIO_FORMAT_[A-Z0-9_]*\).*/\1/p' | head -n1)"
+      BUILT_RATE="$(printf '%s\n' "$built_lines" | sed -n 's/.*AUDIO_FORMAT_[A-Z0-9_]*; *\([0-9]*\).*/\1/p' | head -n1)"
+      BUILT_DEV="$(printf '%s\n' "$built_lines" | sed -n 's/.*Devices: *{\(AUDIO_DEVICE_OUT_[A-Z0-9_]*\).*/\1/p' | head -n1)"
+      BUILT_BITS="$(bits_of_fmt "$BUILT_FMT")"
+      case "$BUILT_DEV" in
+        *SPEAKER*) BUILT_DEV_NAME="扬声器" ;;
+        *WIRED_HEADSET*|*WIRED_HEADPHONE*) BUILT_DEV_NAME="3.5mm耳机" ;;
+        *EARPIECE*) BUILT_DEV_NAME="听筒" ;;
+        *) BUILT_DEV_NAME="内置设备" ;;
+      esac
+    fi
   fi
 fi
 rm -f "$D2" "$USBF" "$USBF_ACTIVE" 2>/dev/null
@@ -1262,25 +1312,25 @@ elif [ -n "$OUT_FMT" ]; then
   else
     VERDICT_LINE="✅ 输出通道在跑：${OUT_CHAN:-USB} ${OUT_BITS:-?} @ ${OUT_RATE:-?} Hz（明细见排查段）"
   fi
+elif [ -n "${BUILT_RATE:-}" ] && [ -n "${BUILT_BITS:-}" ]; then
+  spk_brief=""
+  [ "${SPK_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 扬声器(${SPK_ACTIVE_N})"
+  [ "${EARPIECE_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 听筒(${EARPIECE_ACTIVE_N})"
+  [ "${WIRED_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 3.5mm耳机(${WIRED_ACTIVE_N})"
+  [ -z "$spk_brief" ] && spk_brief="内置输出"
+  OUTPUT_LINE="${BUILT_DEV_NAME:-$spk_brief} (${BUILT_CHAN:-直通/混音}) → ${BUILT_BITS} @ ${BUILT_RATE} Hz"
+  VERDICT_LINE="✅ 内置声卡通道在跑：${BUILT_DEV_NAME:-$spk_brief} 实测按 ${BUILT_BITS} @ ${BUILT_RATE} Hz 真实输出（小尾巴未插）"
 elif [ "${NOTE_RUN:-no}" = yes ]; then
   OUTPUT_LINE="有 PCM 流在跑（明细见排查段第 5 条）"
   VERDICT_LINE="✅ 有音频流，规格见第 5 段明细"
 elif [ "${PHONE_ACTIVE_N:-0}" -gt 0 ] || [ "${MEDIA_PLAYING_N:-0}" -gt 0 ] 2>/dev/null; then
-  # No USB output, but the loudspeaker / earpiece / wired headset is carrying
-  # audio.  This is a NORMAL state when no DAC is connected -- do NOT warn.
-  # The module is "idling on the speaker side" and the user just doesn't have
-  # a dongle plugged in.  Before v1.9 the [7] segment reported a misleading
-  # "no audio in playback" warning in this case.
   spk_brief=""
   [ "${SPK_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 扬声器(${SPK_ACTIVE_N})"
   [ "${EARPIECE_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 听筒(${EARPIECE_ACTIVE_N})"
-  [ "${WIRED_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 有线耳机(${WIRED_ACTIVE_N})"
-  if [ -z "$spk_brief" ]; then
-    # routed to a built-in device that the buckets don't track (BT? BT_A2DP?)
-    spk_brief="内置输出"
-  fi
+  [ "${WIRED_ACTIVE_N:-0}" -gt 0 ] && spk_brief="$spk_brief 3.5mm耳机(${WIRED_ACTIVE_N})"
+  [ -z "$spk_brief" ] && spk_brief="内置输出"
   OUTPUT_LINE="App 在 ${spk_brief} 上播放（未连接 USB DAC）"
-  VERDICT_LINE="ℹ️ 小尾巴未连接：模块在小尾巴侧处于空载，但手机 ${spk_brief} 播放正常（媒体 started 流 ${MEDIA_PLAYING_N} 条）。插上小尾巴后 USB 链路判定立刻生效 —— 详见 5b"
+  VERDICT_LINE="ℹ️ 小尾巴未连接：手机 ${spk_brief} 正在播放（媒体 started 流 ${MEDIA_PLAYING_N} 条）"
 else
   OUTPUT_LINE="此刻没有任何音频在播"
   VERDICT_LINE="ℹ️ 系统无音频播放：手机扬声器、听筒、有线耳机、USB DAC 都空。插上小尾巴/播一首歌后再点「开始校验」"

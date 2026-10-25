@@ -72,6 +72,24 @@ BEGIN {
   # The caller may set -v MIX_KEEP_ALL=1 to additionally retain the factory
   # rates, which keeps e.g. 48 kHz sources reachable at 48 kHz.
   if (MIX_KEEP_ALL == "") MIX_KEEP_ALL = 0
+  # FAULTMSG: set by a generator that refuses to emit -- END CONSUMES it before
+  # a single output line is written: the message goes to stderr, the exit code
+  # is 1 and stdout stays empty, so no partial / empty file is left behind for
+  # anyone to mount.  An unconsumed FAULTMSG (the 2026-10-17 defect) silently
+  # returned exit 0 while dropping a whole devicePort block from the product.
+  FAULTMSG = ""
+  # DYN_STRICT: 0 (default) = a clone source declaring channelMasks="dynamic"
+  # is ACCEPTED, because "dynamic" is the AOSP sentinel AUDIO_CHANNEL_OUT_DYNAMIC
+  # -- a value the vendor HAL is expected to resolve, and the one the K20 Pro's
+  # own factory 16-bit USB profile carries.  On-device evidence (K20 Pro,
+  # 2026-10-17): the shipped live policy IS that 24/32-bit dynamic clone and
+  # audioserver ran 14.5 h on it with zero crashes, while every audioserver
+  # tombstone on that device traces to the OLDER system build (:16), not to this
+  # file -- so refusing "dynamic" would delete the module's whole USB tier for
+  # no evidence-backed reason.  1 = the conservative reading (treat "dynamic" as
+  # unfit for a depth the factory never declared) and refuse the whole file; it
+  # exists so the stricter contract can be reproduced on demand.
+  if (DYN_STRICT == "") DYN_STRICT = 0
   RSEP = " "         # replaced once the dialect is known (see END)
   # HIFI defaults to "auto": leave dynamic vendor HiFi mixPorts untouched.
   # A numeric value turns them into statically profiled ports (see the header
@@ -398,7 +416,7 @@ function emit_hifi(bn, name,   i, k, ind, head, op, b, prof, np, PLN) {
 function emit_block(bn, cls, kind, name,
                     i, k, e, ne, ln, ft, tok, ispcm, fpcm,
                     rates, rline, pb16, pb24, pb32, old, nw, tag, v, b,
-                    bs, be, cn, lastend) {
+                    bs, be, cn, lastend, chm, chl, chd, why) {
   if (cls == "") { for (i = 1; i <= bn; i++) out(B[i]); return }
   if (cls == "hifi") { emit_hifi(bn, name); return }
 
@@ -464,6 +482,12 @@ function emit_block(bn, cls, kind, name,
   #         channel masks, indentation and line breaks are the phone's, not
   #         something we invented.
   cn = 0
+  # tag is the port identity used by the guard's message and by the ports=
+  # provenance line at the end of this function.  Set it ONCE here, before the
+  # guard, so a refusal names the port it refused.
+  tag = kind ":" name
+  if (cls == "direct") tag = tag "=DIRECT"
+  else if (cls == "mixer") tag = tag "=MIXER"
   # Mixer-class device ports (speaker / earpiece) join the fill only when the
   # caller raised SPKBITS above 16, and they use SPKBITS as their ceiling;
   # every other class keeps the global BITS ceiling.  Mixer *mixPorts* never
@@ -471,6 +495,57 @@ function emit_block(bn, cls, kind, name,
   if (fpcm > 0 && (cls != "mixer" || kind == "dev")) {
     bitcap = ((cls == "mixer") ? SPKBITS : BITS) + 0
     if (bitcap < 16 || bitcap > 32) bitcap = 16
+    # the fill only happens for a depth the factory did not declare
+    need_fill = 0
+    for (b = 24; b <= 32; b += 8) {
+      if (bitcap < b) continue
+      if (b == 24 && pb24 == 1) continue
+      if (b == 32 && pb32 == 1) continue
+      need_fill = 1
+    }
+    # ---- frame-size guard (2026-10-17, K20 Pro evidence) ------------------
+    # AudioFlinger derives the frame size of an output stream from the profile
+    # it opened: bytes-per-sample(format) x channel count.  A profile with NO
+    # channel declaration at all yields a frame size of 0 there, and
+    # AudioStreamOut::open() then hits
+    #     LOG_ALWAYS_FATAL("frame size was 0 but must be greater than zero")
+    # -> audioserver SIGABRT -> crash loop -> the phone never paints the boot
+    # animation (10 identical tombstones on the Redmi K20 Pro).
+    #
+    # EMPTY is the fault this guard exists for: we clone the port's own first
+    # PCM element, so an element with no channelMasks / channelLayouts at all
+    # would be cloned into 24- and 32-bit siblings with nothing for the HAL to
+    # resolve -> guaranteed frame size 0.  A hard refusal, because the module is
+    # optional and keeping the factory policy costs only the patch.
+    #
+    # The literal "dynamic" is NOT in that class (DYN_STRICT=1 opts into the
+    # stricter reading): it is the AOSP sentinel AUDIO_CHANNEL_OUT_DYNAMIC, the
+    # vendor HAL is expected to resolve it, and the K20 Pro's own shipped,
+    # 14.5 h-stable live policy contains exactly such a clone.  Refusing it
+    # would silently delete the module's whole USB / wired tier.
+    #
+    # SCOPE -- this is the fix for the 2026-10-17 silent-corruption defect.  The
+    # clone SOURCE is T[ESTART[fpcm]..EEND[fpcm]], and the guard used to read
+    # channelMasks from T[bs..be] -- bs/be still holding the LAST profile of the
+    # block at that point, not the first.  The two ranges differ whenever a
+    # factory port declares different depth profiles, so the guard could pass a
+    # port whose clone source is unfit (silent corruption) or refuse a port
+    # whose clone source is fine (whole devicePort block dropped, exit 0).
+    # Reading the clone source itself makes the verdict exact.
+    if (need_fill) {
+      bs = ESTART[fpcm]; be = EEND[fpcm]
+      chm = ""; chl = ""
+      for (k = bs; k <= be; k++) {
+        if (chm == "") chm = attr(T[k], "channelMasks")
+        if (chl == "") chl = attr(T[k], "channelLayouts")
+      }
+      chd = (chm != "") ? chm : chl
+      if (chd == "" || (DYN_STRICT == 1 && chd == "dynamic")) {
+        why = (chd == "") ? "no channelMasks / channelLayouts at all" : "channelMasks=\"dynamic\" (DYN_STRICT=1)"
+        FAULTMSG = sprintf("port %s: the 24/32-bit clone source has %s, so the cloned profile would carry a frame size of 0, which AudioFlinger treats as fatal; refusing to generate this file", tag, why)
+        return
+      }
+    }
     bs = ESTART[fpcm]; be = EEND[fpcm]
     for (b = 24; b <= 32; b += 8) {
       if (bitcap < b) continue
@@ -498,9 +573,6 @@ function emit_block(bn, cls, kind, name,
   }
 
   NPORT++
-  tag = kind ":" name
-  if (cls == "direct") tag = tag "=DIRECT"
-  else if (cls == "mixer") tag = tag "=MIXER"
   PORTS = PORTS (PORTS == "" ? "" : ",") tag
 }
 
@@ -581,6 +653,21 @@ END {
     }
     out(L[i])
     i++
+  }
+
+  # ---- FAULT CONSUMPTION -------------------------------------------------
+  # The whole structural walk lives inside this END block, so a generator that
+  # could not emit a sound product may only discover it part-way down
+  # (emit_block sets FAULTMSG and returns).  Until this fix nothing ever read
+  # that message: the block it belonged to was silently absent from the
+  # product, stdout looked fine, stderr was empty and the exit code was 0 --
+  # the caller would archive and mount a policy whose entire USB devicePort
+  # block had vanished.  Consume it HERE, after the walk and BEFORE the first
+  # output line: exit 1, message on stderr, empty stdout, exit-code-and-stderr
+  # visible refusal as the header contract promises.
+  if (FAULTMSG != "") {
+    printf("patch_policy: %s\n", FAULTMSG) > "/dev/stderr"
+    exit 1
   }
 
   hdr1 = "<!-- " MARKER " v" VER " | dialect=" DIA " | stock=" STOCKPATH " | mixer=" MIXER " ceiling=" CEIL " bits=" BITS " hifi=" HIFI " spk=" SPK " spkbits=" SPKBITS " | generated, do not hand edit -->"
